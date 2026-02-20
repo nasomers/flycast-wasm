@@ -4,6 +4,8 @@
 
 The first known public build of [Flycast](https://github.com/flyinghead/flycast) compiled to WASM, running as a libretro core inside [EmulatorJS](https://emulatorjs.org). February 2026.
 
+[![Flycast WASM Demo — Dreamcast in the Browser](https://img.youtube.com/vi/VAGoy-kjqYA/maxresdefault.jpg)](https://www.youtube.com/watch?v=VAGoy-kjqYA)
+
 ## Status: Working
 
 Games boot with real BIOS, render via WebGL2, and play with full audio.
