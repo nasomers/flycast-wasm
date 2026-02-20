@@ -18,6 +18,10 @@ node_modules/
 Thumbs.db
 desktop.ini
 
+# Internal docs (not public)
+CLAUDE.md
+flycast-wasm-sharing-guide.md
+
 # Editor
 .vscode/
 .idea/
