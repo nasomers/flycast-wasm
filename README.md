@@ -10,6 +10,12 @@ The first known public build of [Flycast](https://github.com/flyinghead/flycast)
 
 Games boot with real BIOS, render via WebGL2, and play with full audio.
 
+<p align="center">
+  <img src="screenshots/bios.png" width="32%" alt="Dreamcast BIOS boot">
+  <img src="screenshots/jetgrind.png" width="32%" alt="Jet Grind Radio">
+  <img src="screenshots/shenmue.png" width="32%" alt="Shenmue">
+</p>
+
 | Game | Performance | Notes |
 |------|-------------|-------|
 | 18 Wheeler | Near-perfect | Arcade-style, GPU-heavy |
@@ -95,10 +101,13 @@ flycast-wasm/
 │   └── flycast_stubs_cpp.cpp           # Dynarec no-op stub (C++)
 ├── build/
 │   └── link.sh                         # Emscripten link script
-└── config/
-    ├── core.json                       # EmulatorJS core metadata
-    ├── build.json                      # EmulatorJS build metadata
-    └── dreamcast-core-options.json     # Tuned core options for WASM
+├── config/
+│   ├── core.json                       # EmulatorJS core metadata
+│   ├── build.json                      # EmulatorJS build metadata
+│   └── dreamcast-core-options.json     # Tuned core options for WASM
+├── demo/
+│   └── server.js                       # Standalone demo server (Node.js)
+└── screenshots/                        # BIOS boot, gameplay captures
 ```
 
 Pre-built binaries (`flycast_libretro.js`, `flycast_libretro.wasm`, `flycast-wasm.data`) are available in [Releases](../../releases).
