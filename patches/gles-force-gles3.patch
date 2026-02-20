@@ -1,0 +1,32 @@
+--- /home/ghost/flycast-wasm/flycast/core/rend/gles/gles.cpp.bak	2026-02-20 11:20:10.015412275 -0500
++++ /home/ghost/flycast-wasm/flycast/core/rend/gles/gles.cpp	2026-02-20 11:24:37.919360845 -0500
+@@ -411,6 +411,21 @@
+ 
+ 	const char *version = (const char *)glGetString(GL_VERSION);
+ 	NOTICE_LOG(RENDERER, "OpenGL version: %s", version);
++#ifdef __EMSCRIPTEN__
++	// Force GLES3 on WebGL2 - runtime glGetString returns garbage in WASM
++	gl.is_gles = true;
++	gl.gl_major = 3;
++	gl.gl_minor = 0;
++	gl.gl_version = "GLES3";
++	gl.glsl_version_header = "#version 300 es";
++	gl.single_channel_format = GL_ALPHA;
++	{
++		GLint stencilBits = 0;
++		glGetIntegerv(GL_STENCIL_BITS, &stencilBits);
++		if (stencilBits == 0)
++			gl.stencil_present = false;
++	}
++#else
+ 	if (!strncmp(version, "OpenGL ES", 9))
+ 	{
+ 		gl.is_gles = true;
+@@ -448,6 +463,7 @@
+ 			gl.single_channel_format = GL_ALPHA;
+ 		}
+ 	}
++#endif // __EMSCRIPTEN__
+ 	gl.max_anisotropy = 1.f;
+ #ifndef HAVE_OPENGLES2
+ 	if (gl.gl_major >= 3)

@@ -1,0 +1,256 @@
+diff --git a/Makefile b/Makefile
+index 01d99c30..7d0c2ece 100644
+--- a/Makefile
++++ b/Makefile
+@@ -866,11 +866,16 @@ else ifeq ($(platform), emscripten)
+ 	FORCE_GLES := 1
+ 	WITH_DYNAREC=
+ 	CPUFLAGS += -Dasm=asmerror -D__asm__=asmerror -DNO_ASM -DNOSSE
++	INCFLAGS += -I$(CORE_DIR)/core/deps/zlib
++	CFLAGS += -DTARGET_NO_EXCEPTIONS -include unistd.h
++	CXXFLAGS += -DTARGET_NO_EXCEPTIONS
+ 	SINGLE_THREAD := 1
++	HAVE_OPENMP = 0
+ 	PLATCFLAGS += -Drglgen_resolve_symbols_custom=reicast_rglgen_resolve_symbols_custom \
+ 					  -Drglgen_resolve_symbols=reicast_rglgen_resolve_symbols
+ 
+-	NO_REC=0
++	NO_REC=1
++	HAVE_GENERIC_JIT = 0
+ 	PLATFORM_EXT := unix
+ 	#HAVE_SHARED_CONTEXT := 1
+ 
+@@ -945,6 +950,11 @@ ifeq ($(WITH_DYNAREC), mips)
+ 	HOST_CPU_FLAGS = -DHOST_CPU=$(HOST_CPU_MIPS)
+ endif
+ 
++# Fix: emscripten must use CPU_GENERIC
++ifeq ($(platform), emscripten)
++HOST_CPU_FLAGS = -DHOST_CPU=0x20000005
++endif
++
+ ifeq ($(FORCE_GLES),1)
+ 	GLES = 1
+ 	GL_LIB := -lGLESv2
+diff --git a/core/hw/sh4/sh4_core_regs.cpp b/core/hw/sh4/sh4_core_regs.cpp
+index 8bfb6cec..5c75b73a 100644
+--- a/core/hw/sh4/sh4_core_regs.cpp
++++ b/core/hw/sh4/sh4_core_regs.cpp
+@@ -6,6 +6,10 @@
+ #include "sh4_core.h"
+ #include "sh4_interrupts.h"
+ 
++#if HOST_CPU == CPU_GENERIC
++#include <cfenv>
++#endif
++
+ 
+ Sh4RCB* p_sh4rcb;
+ sh4_if  sh4_cpu;
+@@ -136,8 +140,13 @@ static void setHostRoundingMode()
+                 :
+                 : "r"(off_mask), "r"(on_mask)
+             );
+-#else
+-	#error "SetFloatStatusReg: Unsupported platform"
++#elif HOST_CPU == CPU_GENERIC
++        // Use C99 fenv for generic/WASM platforms
++        if (fpscr.RM == 1)
++            std::fesetround(FE_TOWARDZERO);
++        else
++            std::fesetround(FE_TONEAREST);
++        // Denormal flush-to-zero not available via standard C - skip for WASM
+ #endif
+ #endif
+ 
+diff --git a/core/libretro/libretro.cpp b/core/libretro/libretro.cpp
+index 2efca4b0..b9fd84d8 100644
+--- a/core/libretro/libretro.cpp
++++ b/core/libretro/libretro.cpp
+@@ -2,6 +2,9 @@
+ #include <cstdarg>
+ #include <math.h>
+ #include "types.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #ifndef _WIN32
+ #include <sys/time.h>
+ #endif
+@@ -1891,6 +1894,7 @@ bool retro_load_game(const struct retro_game_info *game)
+       if (ext)
+       {
+          log_cb(RETRO_LOG_INFO, "File extension is: %s\n", ext);
++         log_cb(RETRO_LOG_INFO, "[TRACE] extension logged, continuing\n");
+          if (!strcmp(".lst", ext)
+         	   || !strcmp(".bin", ext) || !strcmp(".BIN", ext)
+         	   || !strcmp(".dat", ext) || !strcmp(".DAT", ext)
+@@ -1926,6 +1930,7 @@ bool retro_load_game(const struct retro_game_info *game)
+       }
+    }
+ 
++   if (log_cb) log_cb(RETRO_LOG_INFO, "[TRACE-A] checking game->path\n");
+    if (game->path[0] == '\0')
+    {
+ 	  if (settings.System == DC_PLATFORM_DREAMCAST)
+@@ -1959,7 +1964,9 @@ bool retro_load_game(const struct retro_game_info *game)
+ 
+          disk_paths.push_back(game->path);
+ 
++         if (log_cb) log_cb(RETRO_LOG_INFO, "[TRACE-B] before fill_short_pathname_rep\n");
+          fill_short_pathname_representation(disk_label, game->path, sizeof(disk_label));
++         if (log_cb) log_cb(RETRO_LOG_INFO, "[TRACE-C] after fill_short_pathname_rep\n");
+          disk_labels.push_back(disk_label);
+ 
+          game_data = strdup(game->path);
+@@ -1969,10 +1976,12 @@ bool retro_load_game(const struct retro_game_info *game)
+    {
+       char data_dir[1024];
+ 
++      if (log_cb) log_cb(RETRO_LOG_INFO, "[TRACE-D] before data_dir snprintf\n");
+       snprintf(data_dir, sizeof(data_dir), "%s%s", game_dir, "data");
+ 
+       INFO_LOG(COMMON, "Creating dir: %s", data_dir);
+       struct stat buf;
++      if (log_cb) log_cb(RETRO_LOG_INFO, "[TRACE-E] before stat(data_dir)\n");
+       if (stat(data_dir, &buf) < 0)
+       {
+          path_mkdir(data_dir);
+@@ -1980,6 +1989,7 @@ bool retro_load_game(const struct retro_game_info *game)
+    }
+ 
+    u32 preferred;
++   if (log_cb) log_cb(RETRO_LOG_INFO, "[TRACE] before GET_PREFERRED_HW_RENDER\n");
+    if (!environ_cb(RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER, &preferred))
+       preferred = RETRO_HW_CONTEXT_DUMMY;
+    bool foundRenderApi = false;
+@@ -2011,6 +2021,7 @@ bool retro_load_game(const struct retro_game_info *game)
+ #endif
+    }
+ 
++   if (log_cb) log_cb(RETRO_LOG_INFO, "[TRACE] foundRenderApi=%d\n", foundRenderApi);
+    if (!foundRenderApi)
+       return false;
+ 
+@@ -2038,8 +2049,11 @@ bool retro_load_game(const struct retro_game_info *game)
+       snprintf(nvmem_file2, sizeof(nvmem_file2), "%s%s.nvmem2", save_dir, g_base_name);
+    }
+ 
++   if (log_cb) log_cb(RETRO_LOG_INFO, "[TRACE] before dc_prepare_system\n");
+    dc_prepare_system();
++   if (log_cb) log_cb(RETRO_LOG_INFO, "[TRACE] dc_prepare_system done\n");
+ 
++   if (log_cb) log_cb(RETRO_LOG_INFO, "[TRACE] before dc_init\n");
+    if (dc_init())
+    {
+    	ERROR_LOG(BOOT, "Flycast emulator initialization failed");
+@@ -3270,11 +3284,14 @@ int push_vmu_screen(u8* buffer) { return 0; }
+ void os_DebugBreak(void)
+ {
+ 	ERROR_LOG(COMMON, "DEBUGBREAK!");
+-   //exit(-1);
+-#ifdef HAVE_LIBNX
+-   svcExitProcess();
++#ifdef __EMSCRIPTEN__
++	emscripten_log(EM_LOG_ERROR | EM_LOG_C_STACK | EM_LOG_DEMANGLE,
++		"os_DebugBreak: verify/die triggered");
++	abort();
++#elif defined(HAVE_LIBNX)
++	svcExitProcess();
+ #else
+-   __builtin_trap();
++	__builtin_trap();
+ #endif
+ }
+ 
+diff --git a/core/nullDC.cpp b/core/nullDC.cpp
+index 8560b243..086e1aa2 100644
+--- a/core/nullDC.cpp
++++ b/core/nullDC.cpp
+@@ -396,13 +396,16 @@ int dc_init()
+    extern void common_libretro_setup(void);
+    common_libretro_setup();
+ 
++	fprintf(stderr, "[TRACE] dc_init: before _vmem_reserve\n");
+ 	if (!_vmem_reserve())
+ 	{
+ 		ERROR_LOG(VMEM, "Failed to alloc mem");
+ 		return -1;
+ 	}
++	fprintf(stderr, "[TRACE] dc_init: vmem ok, before reios_init\n");
+ 	reios_init();
+ 
++	fprintf(stderr, "[TRACE] dc_init: before LoadSettings\n");
+ 	LoadSettings();
+ 
+ 	int rv= 0;
+@@ -417,6 +420,7 @@ int dc_init()
+    sprintf(new_system_dir, "%s/", game_dir_no_slash);
+ #endif
+ 
++   fprintf(stderr, "[TRACE] dc_init: system=%d UseReios=%d\n", settings.System, settings.bios.UseReios);
+    if (settings.System == DC_PLATFORM_DREAMCAST)
+    {
+       if (settings.bios.UseReios || !LoadRomFiles(new_system_dir))
+@@ -433,9 +437,12 @@ int dc_init()
+    {
+    	LoadRomFiles(new_system_dir);
+    }
++   fprintf(stderr, "[TRACE] dc_init: before LoadSpecialSettingsCPU\n");
+    LoadSpecialSettingsCPU();
+ 
++	fprintf(stderr, "[TRACE] dc_init: before sh4_cpu.Init\n");
+ 	sh4_cpu.Init();
++	fprintf(stderr, "[TRACE] dc_init: sh4 ok, before mem_Init\n");
+ 	mem_Init();
+ 
+ #ifdef _WIN64
+@@ -443,11 +450,14 @@ int dc_init()
+ 	setup_seh();
+ #endif
+ 
++	fprintf(stderr, "[TRACE] dc_init: before plugins_Init\n");
+ 	if (plugins_Init())
+ 	   return -4;
+ 	
++	fprintf(stderr, "[TRACE] dc_init: plugins ok, before mem_map_default\n");
+ 	mem_map_default();
+ 
++	fprintf(stderr, "[TRACE] dc_init: before dc_reset\n");
+ 	dc_reset(true);
+ 
+ 	switch (settings.System)
+diff --git a/core/rend/gles/gles.cpp b/core/rend/gles/gles.cpp
+index 86df5f2b..9d670570 100644
+--- a/core/rend/gles/gles.cpp
++++ b/core/rend/gles/gles.cpp
+@@ -411,6 +411,21 @@ void findGLVersion()
+ 
+ 	const char *version = (const char *)glGetString(GL_VERSION);
+ 	NOTICE_LOG(RENDERER, "OpenGL version: %s", version);
++#ifdef __EMSCRIPTEN__
++	// Force GLES3 on WebGL2 - runtime glGetString returns garbage in WASM
++	gl.is_gles = true;
++	gl.gl_major = 3;
++	gl.gl_minor = 0;
++	gl.gl_version = "GLES3";
++	gl.glsl_version_header = "#version 300 es";
++	gl.single_channel_format = GL_ALPHA;
++	{
++		GLint stencilBits = 0;
++		glGetIntegerv(GL_STENCIL_BITS, &stencilBits);
++		if (stencilBits == 0)
++			gl.stencil_present = false;
++	}
++#else
+ 	if (!strncmp(version, "OpenGL ES", 9))
+ 	{
+ 		gl.is_gles = true;
+@@ -448,6 +463,7 @@ void findGLVersion()
+ 			gl.single_channel_format = GL_ALPHA;
+ 		}
+ 	}
++#endif // __EMSCRIPTEN__
+ 	gl.max_anisotropy = 1.f;
+ #ifndef HAVE_OPENGLES2
+ 	if (gl.gl_major >= 3)
