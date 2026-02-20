@@ -121,7 +121,7 @@ LDFLAGS += -pthread -sPROXY_TO_PTHREAD
 **Core option:** `reicast_threaded_rendering: 'enabled'`
 
 **Prerequisites:**
-- SharedArrayBuffer support (requires COEP/COOP headers — already present in our server)
+- SharedArrayBuffer support (requires COEP/COOP headers — already present in the demo server)
 - Electron or a secure context with cross-origin isolation
 - EmulatorJS must not break when the WASM module spawns Web Workers
 
@@ -157,7 +157,7 @@ Could experiment with `reicast_framerate: 'fullspeed'` for uncapped mode if audi
 
 **Current:** `'per-strip (fast, least accurate)'` — already the fastest option.
 
-Per-pixel alpha sorting is much more GPU-intensive. We're already on the fastest setting.
+Per-pixel alpha sorting is much more GPU-intensive. Already on the fastest setting.
 
 ---
 

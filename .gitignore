@@ -5,6 +5,11 @@ build/flycast_stubs_cpp.o
 build/gles_patched.o
 dist/
 
+# Demo runtime (user provides these locally)
+demo/data/
+demo/bios/
+demo/roms/
+
 # Node
 node_modules/
 

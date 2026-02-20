@@ -18,7 +18,7 @@ Flycast is the leading Sega Dreamcast emulator. It has never officially supporte
 - **Libretro buildbot** does not produce Flycast among its ~97 emscripten core builds.
 - **No prior art.** No GitHub issues, forum posts, Reddit threads, or blog posts document a working Flycast WASM build.
 
-The **deprecated** `libretro/flycast` fork has an emscripten platform target in its Makefile — broken, years stale, but structurally present. This is our starting point.
+The **deprecated** `libretro/flycast` fork has an emscripten platform target in its Makefile — broken, years stale, but structurally present. This was my starting point.
 
 Over 30 distinct bugs were identified and fixed across the Makefile, C/C++ source, Emscripten linker configuration, JavaScript runtime environment, and EmulatorJS integration layer.
 
@@ -215,7 +215,7 @@ And add `#endif // __EMSCRIPTEN__` after the existing version detection block's 
 
 1. **Emscripten `--js-library` override** (`gl_override.js`) — intercepts `_glGetString` at the Emscripten symbol level, catching RetroArch's GL driver calls
 2. **WebGL2 `getParameter` runtime patch** — intercepts direct `ctx.getParameter(GL_VERSION)` calls at the browser API level
-3. **Source code patch** (this one) — bypasses both JS layers entirely, because Flycast's renderer gets its GL function pointers through RetroArch's HW render callback (`get_proc_address`), which can resolve to different implementations than the ones we patched
+3. **Source code patch** (this one) — bypasses both JS layers entirely, because Flycast's renderer gets its GL function pointers through RetroArch's HW render callback (`get_proc_address`), which can resolve to different implementations than the ones patched above
 
 All three are necessary. Removing any one causes black screen for specific code paths.
 
@@ -262,9 +262,9 @@ emmake make -f Makefile platform=emscripten -j$(nproc) 2>&1 | tee build.log
 
 Build time: ~2 minutes on 16 threads.
 
-This produces `.o` object files throughout the source tree. The Makefile's final "link" step produces standalone JavaScript — **ignore it**. We link separately with RetroArch.
+This produces `.o` object files throughout the source tree. The Makefile's final "link" step produces standalone JavaScript — **ignore it**. The linking is done separately with RetroArch.
 
-**Critical note on `.bc` vs `.o` files:** With emsdk 3.1.74, the Makefile's `EXT ?= bc` is a historical artifact. Modern Emscripten produces WebAssembly object files (`.o` with `\0asm` magic), not LLVM bitcode. The Makefile's final link step uses `em++` which produces a standalone JS file, not an intermediate library. We skip this entirely and archive the `.o` files ourselves.
+**Critical note on `.bc` vs `.o` files:** With emsdk 3.1.74, the Makefile's `EXT ?= bc` is a historical artifact. Modern Emscripten produces WebAssembly object files (`.o` with `\0asm` magic), not LLVM bitcode. The Makefile's final link step uses `em++` which produces a standalone JS file, not an intermediate library. Skip this entirely and archive the `.o` files directly.
 
 ### Verify JIT Symbols Are Excluded
 
@@ -430,7 +430,7 @@ source ~/.emsdk/emsdk_env.sh
 # Collect RetroArch objects, EXCLUDING:
 # - libchdr objects (Flycast has its own with FLAC support — RA's lacks it)
 # - file_path.o (signature mismatch — see Phase 5)
-# - flycast_stubs (we provide our own)
+# - flycast_stubs (provided separately)
 RA_OBJS=$(find EJS-RetroArch/obj-emscripten -name '*.o' -type f \
     | grep -vE 'libchdr_chd|libchdr_cdrom|libchdr_lzma|libchdr_bitstream|libchdr_huffman|libchdr_zlib|libchdr_flac|chd_stream|LzmaEnc|LzmaDec|Lzma2Dec|Lzma86Dec|flycast_stubs' \
     | sort)
@@ -439,7 +439,7 @@ RA_COUNT=$(echo "$RA_OBJS" | wc -l)
 echo "RetroArch objects: $RA_COUNT (excluding libchdr/file_path/stubs)"
 
 # LINK ORDER MATTERS:
-# 1. Stubs first — our fill_short_pathname_representation wins over RA's
+# 1. Stubs first — custom fill_short_pathname_representation wins over RA's
 # 2. RetroArch objects
 # 3. Flycast archive last (fills remaining unresolved symbols)
 emcc -O2 \
@@ -603,7 +603,7 @@ ctx.getError = function() {
 
 **Without this patch, no games will boot.** RetroArch prints `[ERROR] [GL] GL: Invalid enum` followed by `Cannot open video driver. Exiting...` and the screen stays black.
 
-**Discovery story:** We initially added a full GL debug interceptor wrapping ~20 GL functions to diagnose shader compilation issues. This inadvertently consumed all GL errors via `getError()` calls in the wrappers, masking the `GL_INVALID_ENUM`. Games worked. When we removed the heavy interceptor for performance, the errors came back and crashed video init. The targeted `getError` wrapper above is the minimal fix — it only suppresses 0x500, passing all other errors through.
+**Discovery story:** I initially added a full GL debug interceptor wrapping ~20 GL functions to diagnose shader compilation issues. This inadvertently consumed all GL errors via `getError()` calls in the wrappers, masking the `GL_INVALID_ENUM`. Games worked. When I removed the heavy interceptor for performance, the errors came back and crashed video init. The targeted `getError` wrapper above is the minimal fix — it only suppresses 0x500, passing all other errors through.
 
 ### Patch C: `texParameteri/f` — Unbound Texture Guard
 

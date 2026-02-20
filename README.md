@@ -21,7 +21,7 @@ Performance is limited by the SH4 interpreter (no dynarec in WASM). GPU-heavy ga
 
 Flycast has never officially supported WebAssembly. The upstream maintainer [explicitly declined](https://github.com/flyinghead/flycast/issues/1883) WASM support. EmulatorJS does not list Dreamcast as a supported system. The libretro buildbot does not produce Flycast WASM cores. No prior public build exists.
 
-The deprecated `libretro/flycast` fork has a broken but structurally present Emscripten target. We fixed it. Over 30 bugs were identified and resolved across the Makefile, C/C++ source, Emscripten linker, JavaScript runtime, and EmulatorJS integration.
+The deprecated `libretro/flycast` fork has a broken but structurally present Emscripten target. I fixed it. Over 30 bugs were identified and resolved across the Makefile, C/C++ source, Emscripten linker, JavaScript runtime, and EmulatorJS integration.
 
 **Read the full technical writeup: [TECHNICAL_WRITEUP.md](TECHNICAL_WRITEUP.md)**
 
@@ -56,7 +56,7 @@ emmake make -f Makefile platform=emscripten -j$(nproc)
 # See TECHNICAL_WRITEUP.md Phases 3-9
 ```
 
-## What We Had to Fix
+## What I Had to Fix
 
 **6 source patches:**
 1. Makefile — Emscripten platform block (zlib, exceptions, OpenMP, NO_REC, HAVE_GENERIC_JIT)
