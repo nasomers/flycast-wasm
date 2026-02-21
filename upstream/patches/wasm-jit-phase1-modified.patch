@@ -1,0 +1,585 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 878b5d5..7496f4e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -186,60 +186,88 @@ if(NINTENDO_SWITCH)
+ 		IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
+ 
+ elseif(LIBRETRO)
+-	add_library(${PROJECT_NAME} SHARED core/emulator.cpp)
+-	if(APPLE)
+-		if(NOT IOS)
+-			set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-undefined,error")
+-		endif()
+-		set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/shell/libretro/libretro.osx.def")
++	if(EMSCRIPTEN)
++		# Emscripten: static library (object files archived later for linking with EmulatorJS RetroArch)
++		add_library(${PROJECT_NAME} STATIC core/emulator.cpp)
++		target_compile_definitions(${PROJECT_NAME} PRIVATE
++			LIBRETRO
++			GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3 HAVE_OIT)
++		target_compile_options(${PROJECT_NAME} PRIVATE -fexceptions)
++		set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "flycast_libretro_emscripten")
++		# Disable features incompatible with WASM
++		set(USE_VULKAN OFF CACHE BOOL "Force vulkan off" FORCE)
++		set(USE_DX9 OFF CACHE BOOL "Force DX9 off" FORCE)
++		set(USE_DX11 OFF CACHE BOOL "Force DX11 off" FORCE)
++		set(USE_OPENMP OFF CACHE BOOL "Force OpenMP off" FORCE)
++		set(USE_BREAKPAD OFF CACHE BOOL "Force breakpad off" FORCE)
++		set(USE_LUA OFF CACHE BOOL "Force Lua off" FORCE)
++		set(USE_DISCORD OFF CACHE BOOL "Force Discord off" FORCE)
++		# Use GLES3 path for GL symbol loading
++		set(USE_GLES ON CACHE BOOL "Force GLES for Emscripten" FORCE)
++		# asio: disable threads (WASM is single-threaded)
++		target_compile_definitions(${PROJECT_NAME} PRIVATE
++			ASIO_DISABLE_THREADS
++			ASIO_DISABLE_LOCAL_SOCKETS
++			ASIO_DISABLE_SERIAL_PORT)
+ 	else()
+-		if(NOT CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
+-			set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
+-		endif()
+-	endif()
+-	set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "flycast_libretro"
+-	  XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
+-	  XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
+-    )
+-	set(CMAKE_SHARED_LIBRARY_PREFIX "")
+-	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+-	target_compile_definitions(${PROJECT_NAME} PRIVATE LIBRETRO)
+-	if(APPLE)
+-		find_library(FOUNDATION Foundation)
+-		target_link_libraries(${PROJECT_NAME} PRIVATE ${FOUNDATION})
+-	endif()
+-	if(ANDROID OR USE_GLES)
+-		target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3 HAVE_OIT)
+-    elseif(IOS)
+-		target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3)
+-		find_library(OPENGLES OpenGLES)
+-		find_library(GLKIT GLKit)
+-		target_link_libraries(${PROJECT_NAME} PRIVATE ${OPENGLES} ${GLKIT})
+-	elseif(USE_GLES2)
+-		target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES2 HAVE_OPENGLES HAVE_OPENGLES2)
+-		if(USE_VIDEOCORE)
+-			target_compile_definitions(${PROJECT_NAME} PRIVATE TARGET_NO_STENCIL)
+-			target_link_libraries(${PROJECT_NAME} PRIVATE "-lbrcmGLESv2")
+-			target_link_directories(${PROJECT_NAME} PRIVATE "/opt/vc/lib")
++		add_library(${PROJECT_NAME} SHARED core/emulator.cpp)
++		if(APPLE)
++			if(NOT IOS)
++				set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-undefined,error")
++			endif()
++			set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/shell/libretro/libretro.osx.def")
+ 		else()
+-			target_link_libraries(${PROJECT_NAME} PRIVATE "-lGLESv2")
+-		endif()
+-	elseif(USE_OPENGL)
+-		if (CMAKE_SYSTEM_NAME MATCHES "FreeBSD|OpenBSD|NetBSD")
+-			find_package(OpenGL REQUIRED)
+-			if(CMAKE_VERSION VERSION_LESS 3.29.0)
+-				target_include_directories(${PROJECT_NAME} PRIVATE ${OPENGL_INCLUDE_DIR})
+-			else()
+-				target_include_directories(${PROJECT_NAME} PRIVATE ${OPENGL_INCLUDE_DIRS})
++			if(NOT CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
++				set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
+ 			endif()
+ 		endif()
+-		target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_OPENGL)
++		set(CMAKE_SHARED_LIBRARY_PREFIX "")
++		target_compile_definitions(${PROJECT_NAME} PRIVATE LIBRETRO)
+ 		if(APPLE)
+-			set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-framework,OpenGL")
+-		else()
+-			target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_OIT)
++			find_library(FOUNDATION Foundation)
++			target_link_libraries(${PROJECT_NAME} PRIVATE ${FOUNDATION})
+ 		endif()
++		if(ANDROID OR USE_GLES)
++			target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3 HAVE_OIT)
++		elseif(IOS)
++			target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3)
++			find_library(OPENGLES OpenGLES)
++			find_library(GLKIT GLKit)
++			target_link_libraries(${PROJECT_NAME} PRIVATE ${OPENGLES} ${GLKIT})
++		elseif(USE_GLES2)
++			target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES2 HAVE_OPENGLES HAVE_OPENGLES2)
++			if(USE_VIDEOCORE)
++				target_compile_definitions(${PROJECT_NAME} PRIVATE TARGET_NO_STENCIL)
++				target_link_libraries(${PROJECT_NAME} PRIVATE "-lbrcmGLESv2")
++				target_link_directories(${PROJECT_NAME} PRIVATE "/opt/vc/lib")
++			else()
++				target_link_libraries(${PROJECT_NAME} PRIVATE "-lGLESv2")
++			endif()
++		elseif(USE_OPENGL)
++			if (CMAKE_SYSTEM_NAME MATCHES "FreeBSD|OpenBSD|NetBSD")
++				find_package(OpenGL REQUIRED)
++				if(CMAKE_VERSION VERSION_LESS 3.29.0)
++					target_include_directories(${PROJECT_NAME} PRIVATE ${OPENGL_INCLUDE_DIR})
++				else()
++					target_include_directories(${PROJECT_NAME} PRIVATE ${OPENGL_INCLUDE_DIRS})
++				endif()
++			endif()
++			target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_OPENGL)
++			if(APPLE)
++				set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-framework,OpenGL")
++			else()
++				target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_OIT)
++			endif()
++		endif()
++	endif()
++	if(NOT EMSCRIPTEN)
++		set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "flycast_libretro"
++		  XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
++		  XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
++		)
++		set(CMAKE_SHARED_LIBRARY_PREFIX "")
+ 	endif()
++	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+ elseif(ANDROID)
+ 	add_library(${PROJECT_NAME} SHARED core/emulator.cpp)
+ 	set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_RELEASE} -O3")
+@@ -1333,7 +1361,9 @@ if("x86" IN_LIST ARCHITECTURE OR "x86_64" IN_LIST ARCHITECTURE)
+ 			core/rec-x64/x64_regalloc.h)
+ 	endif()
+ endif()
+-
++if(EMSCRIPTEN)
++	target_sources(${PROJECT_NAME} PRIVATE core/rec-wasm/rec_wasm.cpp)
++endif()
+ if((USE_OPENGL OR USE_GLES2 OR USE_GLES) AND NOT LIBRETRO)
+ 	add_library(glad STATIC core/deps/glad/src/gl.c)
+ 	if(NOT APPLE AND NOT WIN32 AND NOT SDL2_FOUND)
+diff --git a/core/build.h b/core/build.h
+index 6ea5355..8e25ad1 100755
+--- a/core/build.h
++++ b/core/build.h
+@@ -17,6 +17,7 @@
+ #define CPU_ARM      0x20000002
+ #define CPU_ARM64    0x20000003
+ #define CPU_X64      0x20000004
++#define CPU_GENERIC  0x20000005
+ 
+ //FEAT_SHREC, FEAT_AREC, FEAT_DSPREC
+ #define DYNAREC_NONE	0x40000001
+@@ -24,7 +25,13 @@
+ 
+ //automatic
+ 
+-#if defined(__x86_64__) || defined(_M_X64)
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	#define HOST_CPU CPU_GENERIC
++	// WASM JIT: SH4 recompiler enabled, ARM7/DSP stay interpreter
++	#define FEAT_SHREC DYNAREC_JIT
++	#define FEAT_AREC DYNAREC_NONE
++	#define FEAT_DSPREC DYNAREC_NONE
++#elif defined(__x86_64__) || defined(_M_X64)
+ 	#define HOST_CPU CPU_X64
+ #elif defined(__i386__) || defined(_M_IX86)
+ 	#define HOST_CPU CPU_X86
+diff --git a/core/deps/DreamPicoPort-API b/core/deps/DreamPicoPort-API
+--- a/core/deps/DreamPicoPort-API
++++ b/core/deps/DreamPicoPort-API
+@@ -1 +1 @@
+-Subproject commit e06d9f6c59833fc7bb7f2a33c960614489811ef8
++Subproject commit e06d9f6c59833fc7bb7f2a33c960614489811ef8-dirty
+diff --git a/core/deps/SDL b/core/deps/SDL
+--- a/core/deps/SDL
++++ b/core/deps/SDL
+@@ -1 +1 @@
+-Subproject commit 00d4f1c2c4ad2dc95d26b18743541f57b1dca56d
++Subproject commit 00d4f1c2c4ad2dc95d26b18743541f57b1dca56d-dirty
+diff --git a/core/hw/mem/addrspace.cpp b/core/hw/mem/addrspace.cpp
+index c08cb8e..fd1756b 100644
+--- a/core/hw/mem/addrspace.cpp
++++ b/core/hw/mem/addrspace.cpp
+@@ -7,6 +7,9 @@
+ #include "oslib/oslib.h"
+ #include "oslib/virtmem.h"
+ #include <cassert>
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ 
+ namespace addrspace
+ {
+@@ -410,9 +413,21 @@ void initMappings()
+ 		WARN_LOG(VMEM, "Warning! nvmem is DISABLED (due to failure or not being built-in");
+ 
+ 		// Allocate it all and initialize it.
++#ifdef __EMSCRIPTEN__
++		EM_ASM({ console.log('[rec_wasm] initMappings: allocating Sh4RCB, size=' + $0); }, (int)sizeof(Sh4RCB));
++#endif
+ 		p_sh4rcb = (Sh4RCB*)malloc_pages(sizeof(Sh4RCB));
++#ifdef __EMSCRIPTEN__
++		EM_ASM({ console.log('[rec_wasm] initMappings: p_sh4rcb=' + $0); }, (int)(uintptr_t)p_sh4rcb);
++#endif
+ #if FEAT_SHREC != DYNAREC_NONE
++#ifdef __EMSCRIPTEN__
++		EM_ASM({ console.log('[rec_wasm] initMappings: bm_vmem_pagefill FPCB, size=' + $0); }, (int)sizeof(p_sh4rcb->fpcb));
++#endif
+ 		bm_vmem_pagefill((void**)p_sh4rcb->fpcb, sizeof(p_sh4rcb->fpcb));
++#ifdef __EMSCRIPTEN__
++		EM_ASM({ console.log('[rec_wasm] initMappings: bm_vmem_pagefill done'); });
++#endif
+ #endif
+ 		memset(&p_sh4rcb->cntx, 0, sizeof(p_sh4rcb->cntx));
+ 
+diff --git a/core/hw/pvr/Renderer_if.cpp b/core/hw/pvr/Renderer_if.cpp
+index 4fbb9a5..be30d56 100644
+--- a/core/hw/pvr/Renderer_if.cpp
++++ b/core/hw/pvr/Renderer_if.cpp
+@@ -14,6 +14,10 @@
+ #include <mutex>
+ #include <deque>
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
++
+ #ifdef LIBRETRO
+ void retro_rend_present();
+ void retro_resize_renderer(int w, int h, float aspectRatio);
+@@ -242,7 +246,18 @@ private:
+ 	{
+ 		FC_PROFILE_SCOPE;
+ 
++#ifdef __EMSCRIPTEN__
++		static int present_count = 0;
++		present_count++;
++		bool presResult = renderer->Present();
++		if (present_count <= 5) {
++			EM_ASM({ console.log('[rend] present #' + $0 + ': Present()=' + $1 + ' threaded=' + $2); },
++				present_count, presResult ? 1 : 0, (int)config::ThreadedRendering);
++		}
++		if (presResult)
++#else
+ 		if (renderer->Present())
++#endif
+ 		{
+ 			presented = true;
+ 			if (!config::ThreadedRendering && !ggpo::active())
+@@ -457,6 +472,21 @@ int rend_end_render(int tag, int cycles, int jitter, void *arg)
+ 
+ void rend_vblank()
+ {
++#ifdef __EMSCRIPTEN__
++	static int vblank_count = 0;
++	static int last_fb_enable = -1;
++	static int last_fb_dirty = -1;
++	vblank_count++;
++	int cur_fb_enable = (int)FB_R_CTRL.fb_enable;
++	int cur_fb_dirty = (int)fb_dirty;
++	// Log on change or every 30 vblanks
++	if (cur_fb_enable != last_fb_enable || cur_fb_dirty != last_fb_dirty || (vblank_count % 30) == 0) {
++		EM_ASM({ console.log('[rend] vblank #' + $0 + ': fb_dirty=' + $1 + ' fb_enable=' + $2 + ' render_called=' + $3 + ' rend_enabled=' + $4); },
++			vblank_count, cur_fb_dirty, cur_fb_enable, (int)render_called, (int)rend_is_enabled());
++		last_fb_enable = cur_fb_enable;
++		last_fb_dirty = cur_fb_dirty;
++	}
++#endif
+ 	if (config::EmulateFramebuffer
+ 			|| (!render_called && fb_dirty && FB_R_CTRL.fb_enable))
+ 	{
+diff --git a/core/hw/sh4/dyna/driver.cpp b/core/hw/sh4/dyna/driver.cpp
+index 4e1fbf3..4f61459 100644
+--- a/core/hw/sh4/dyna/driver.cpp
++++ b/core/hw/sh4/dyna/driver.cpp
+@@ -1,6 +1,10 @@
+ #include "types.h"
+ #include <unordered_set>
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
++
+ #include "hw/sh4/sh4_interpreter.h"
+ #include "hw/sh4/sh4_core.h"
+ #include "hw/sh4/sh4_interrupts.h"
+@@ -15,6 +19,10 @@
+ 
+ #if FEAT_SHREC != DYNAREC_NONE
+ 
++#if defined(__EMSCRIPTEN__) && HOST_CPU == CPU_GENERIC
++extern "C" void wasm_dynarec_init();
++#endif
++
+ constexpr u32 CODE_SIZE = 10_MB;
+ constexpr u32 TEMP_CODE_SIZE = 1_MB;
+ constexpr u32 FULL_SIZE = CODE_SIZE + TEMP_CODE_SIZE;
+@@ -342,26 +350,54 @@ void Sh4Recompiler::Reset(bool hard)
+ void Sh4Recompiler::Init()
+ {
+ 	INFO_LOG(DYNAREC, "Sh4Recompiler::Init");
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 1: super::Init()'); });
++#endif
+ 	super::Init();
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 2: bm_Init()'); });
++#endif
+ 	bm_Init();
+-	
++
+ 	if (addrspace::virtmemEnabled())
+ 		verify(&mem_b[0] == ((u8*)getContext()->sq_buffer + sizeof(Sh4Context) + 0x0C000000));
+ 
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 3: prepare_jit_block()'); });
++#endif
+ 	// Call the platform-specific magic to make the pages RWX
+ 	CodeCache = nullptr;
+ #ifdef FEAT_NO_RWX_PAGES
+ 	bool rc = virtmem::prepare_jit_block(SH4_TCB, FULL_SIZE, (void**)&CodeCache, &cc_rx_offset);
+ #else
+ 	bool rc = virtmem::prepare_jit_block(SH4_TCB, FULL_SIZE, (void**)&CodeCache);
++#endif
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 3 result: rc=' + $0 + ' CodeCache=' + $1); }, (int)rc, (int)(uintptr_t)CodeCache);
+ #endif
+ 	verify(rc);
+ 	// Ensure the pointer returned is non-null
+ 	verify(CodeCache != nullptr);
+ 
+ 	TempCodeCache = CodeCache + CODE_SIZE;
++#if defined(__EMSCRIPTEN__) && HOST_CPU == CPU_GENERIC
++	// Ensure WASM dynarec is initialized — the static constructor may not have
++	// run if the linker stripped the translation unit from the archive.
++	wasm_dynarec_init();
++#endif
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 4: sh4Dynarec->init(), sh4Dynarec=' + $0 + ' ctx=' + $1); },
++		(int)(uintptr_t)sh4Dynarec, (int)(uintptr_t)getContext());
++#endif
++	verify(sh4Dynarec != nullptr);
+ 	sh4Dynarec->init(*getContext(), codeBuffer);
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 5: bm_ResetCache()'); });
++#endif
+ 	bm_ResetCache();
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — COMPLETE'); });
++#endif
+ }
+ 
+ void Sh4Recompiler::Term()
+diff --git a/core/hw/sh4/dyna/shil_canonical.h b/core/hw/sh4/dyna/shil_canonical.h
+index a1be200..3727ab8 100644
+--- a/core/hw/sh4/dyna/shil_canonical.h
++++ b/core/hw/sh4/dyna/shil_canonical.h
+@@ -747,6 +747,22 @@ u32,f1,(f32 f1),
+ 	}
+ 	return res;
+ )
++#else
++// CPU_GENERIC (Emscripten/WASM) — same behavior as ARM (NaN → 0x80000000)
++shil_canonical
++(
++u32,f1,(f32 f1),
++	s32 res;
++	if (f1 > 2147483520.0f) {
++		res = 0x7fffffff;
++	}
++	else {
++		res = (s32)f1;
++		if (std::isnan(f1))
++			res = 0x80000000;
++	}
++	return res;
++)
+ #endif
+ 
+ shil_compile
+diff --git a/core/hw/sh4/sh4_core_regs.cpp b/core/hw/sh4/sh4_core_regs.cpp
+index 7542f13..bfaec7d 100644
+--- a/core/hw/sh4/sh4_core_regs.cpp
++++ b/core/hw/sh4/sh4_core_regs.cpp
+@@ -120,6 +120,10 @@ static void setHostRoundingMode(u32 roundingMode, u32 denorm2zero)
+                 : "r"(off_mask), "r"(on_mask)
+ 				: "x10"
+             );
++    #elif defined(__EMSCRIPTEN__) || defined(__wasm__) || HOST_CPU == CPU_GENERIC
++		// WASM/generic: no hardware FPU control — rounding mode is not configurable
++		(void)roundingMode;
++		(void)denorm2zero;
+     #else
+ 	#error "SetFloatStatusReg: Unsupported platform"
+     #endif
+diff --git a/core/linux/context.cpp b/core/linux/context.cpp
+index 461ff26..a8ba32c 100644
+--- a/core/linux/context.cpp
++++ b/core/linux/context.cpp
+@@ -130,6 +130,10 @@ static void context_segfault(host_context_t* hostctx, void* segfault_ctx)
+     #else
+         #error "Unsupported OS"
+ 	#endif
++#elif HOST_CPU == CPU_GENERIC
++	// No segfault context handling for generic/WASM platform (interpreter only)
++	(void)hostctx;
++	(void)segfault_ctx;
+ #else
+ 	#error Unsupported HOST_CPU
+ #endif
+diff --git a/core/linux/posix_vmem.cpp b/core/linux/posix_vmem.cpp
+index 4610515..f52ac64 100644
+--- a/core/linux/posix_vmem.cpp
++++ b/core/linux/posix_vmem.cpp
+@@ -4,7 +4,7 @@
+ // Android and OSX since they are slightly different in some areas.
+ #include "types.h"
+ 
+-#ifndef __SWITCH__
++#if !defined(__SWITCH__) && !defined(__EMSCRIPTEN__)
+ #include <sys/mman.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -326,7 +326,50 @@ void release_jit_block(void *code_area1, void *code_area2, size_t size)
+ 
+ } // namespace virtmem
+ 
+-#endif // !__SWITCH__
++#endif // !__SWITCH__ && !__EMSCRIPTEN__
++
++#ifdef __EMSCRIPTEN__
++// Emscripten: no mmap/shm_open/mprotect support.
++// All virtmem functions are no-ops. addrspace::initMappings() will use
++// the malloc-based fallback path when virtmem::init() returns false.
++#include "hw/mem/addrspace.h"
++#include "hw/sh4/sh4_if.h"
++#include "oslib/virtmem.h"
++
++namespace virtmem
++{
++
++bool region_lock(void *start, size_t len) { return true; }
++bool region_unlock(void *start, size_t len) { return true; }
++bool region_set_exec(void *start, size_t len) { return true; }
++bool init(void **vmem_base_addr, void **sh4rcb_addr, size_t ramSize) { return false; }
++void destroy() {}
++void reset_mem(void *ptr, unsigned size_bytes) { memset(ptr, 0, size_bytes); }
++void ondemand_page(void *address, unsigned size_bytes) {}
++void create_mappings(const Mapping *vmem_maps, unsigned nummaps) {}
++bool prepare_jit_block(void *code_area, size_t size, void **code_area_rwx) {
++	// WASM JIT: no native code execution, but we need a valid buffer for the block manager
++	// Allocate a dummy buffer — rec_wasm doesn't write native code into it, but driver.cpp expects non-null
++	static u8* wasmJitBuffer = nullptr;
++	if (!wasmJitBuffer)
++		wasmJitBuffer = (u8*)malloc(size);
++	if (!wasmJitBuffer)
++		return false;
++	memset(wasmJitBuffer, 0, size);
++	*code_area_rwx = wasmJitBuffer;
++	return true;
++}
++bool prepare_jit_block(void *code_area, size_t size, void **code_area_rw, ptrdiff_t *rx_offset) {
++	bool rc = prepare_jit_block(code_area, size, code_area_rw);
++	if (rc && rx_offset)
++		*rx_offset = 0;
++	return rc;
++}
++void release_jit_block(void *code_area, size_t size) { /* buffer is static, leaked intentionally */ }
++void release_jit_block(void *code_area1, void *code_area2, size_t size) {}
++
++} // namespace virtmem
++#endif // __EMSCRIPTEN__
+ 
+ namespace virtmem
+ {
+diff --git a/core/oslib/virtmem.h b/core/oslib/virtmem.h
+index 143d093..5b72309 100644
+--- a/core/oslib/virtmem.h
++++ b/core/oslib/virtmem.h
+@@ -1,7 +1,10 @@
+ #pragma once
+ #include "types.h"
+ 
+-#if defined(_WIN32) || defined(TARGET_IPHONE) || defined(TARGET_ARM_MAC)
++#if defined(__EMSCRIPTEN__)
++// Emscripten: no native code execution. Use a pointer (allocated via malloc in prepare_jit_block).
++#define DECLARE_CODE_CACHE(Name, Size) static u8 *Name;
++#elif defined(_WIN32) || defined(TARGET_IPHONE) || defined(TARGET_ARM_MAC)
+ #define DECLARE_CODE_CACHE(Name, Size) static u8 *Name;
+ #elif defined(__ANDROID__)
+ #define DECLARE_CODE_CACHE(Name, Size) alignas(4096) static u8 Name[Size];
+diff --git a/shell/cmake/DetectArchitecture.cmake b/shell/cmake/DetectArchitecture.cmake
+index 9a4b855..031fd86 100644
+--- a/shell/cmake/DetectArchitecture.cmake
++++ b/shell/cmake/DetectArchitecture.cmake
+@@ -21,6 +21,9 @@ function(detect_architecture symbol arch)
+     endif()
+ endfunction()
+ 
++detect_architecture("__EMSCRIPTEN__" wasm32)
++detect_architecture("__wasm__" wasm32)
++
+ detect_architecture("__ARM64__" arm64)
+ detect_architecture("__aarch64__" arm64)
+ detect_architecture("_M_ARM64" arm64)
+diff --git a/shell/libretro/libretro.cpp b/shell/libretro/libretro.cpp
+index 9dcc6b3..effec5f 100644
+--- a/shell/libretro/libretro.cpp
++++ b/shell/libretro/libretro.cpp
+@@ -18,6 +18,9 @@
+ #include <cstdarg>
+ #include <math.h>
+ #include "types.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #ifndef _WIN32
+ #include <sys/time.h>
+ #endif
+@@ -1275,6 +1278,22 @@ void retro_run()
+ 		environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avinfo);
+ 	}
+ 
++#ifdef __EMSCRIPTEN__
++	{
++		static int videocb_count = 0;
++		static int first_non_dupe = 0;
++		videocb_count++;
++		if (!is_dupe && first_non_dupe == 0) {
++			first_non_dupe = videocb_count;
++			EM_ASM({ console.log('[retro] FIRST REAL FRAME at video_cb #' + $0 + ' w=' + $1 + ' h=' + $2); },
++				videocb_count, framebufferWidth, framebufferHeight);
++		}
++		if (videocb_count <= 5 || (videocb_count % 10) == 0) {
++			EM_ASM({ console.log('[retro] video_cb #' + $0 + ': is_dupe=' + $1 + ' w=' + $2 + ' h=' + $3); },
++				videocb_count, is_dupe ? 1 : 0, framebufferWidth, framebufferHeight);
++		}
++	}
++#endif
+ 	video_cb(is_dupe ? 0 : RETRO_HW_FRAME_BUFFER_VALID, framebufferWidth, framebufferHeight, 0);
+ 
+ 	if (!config::ThreadedRendering || config::LimitFPS)
+@@ -3579,16 +3598,14 @@ static void retro_keyboard_event(bool down, unsigned keycode, uint32_t character
+ 
+ void fatal_error(const char* text, ...)
+ {
++	va_list args;
++	char temp[2048];
++	va_start(args, text);
++	vsprintf(temp, text, args);
++	va_end(args);
++	strcat(temp, "\n");
+ 	if (log_cb)
+-	{
+-		va_list args;
+-		char temp[2048];
+-		va_start(args, text);
+-		vsprintf(temp, text, args);
+-		va_end(args);
+-		strcat(temp, "\n");
+ 		log_cb(RETRO_LOG_ERROR, temp);
+-	}
+ }
+ 
+ [[noreturn]] void os_DebugBreak()
+@@ -3597,6 +3614,8 @@ void fatal_error(const char* text, ...)
+ 	//exit(-1);
+ #ifdef __SWITCH__
+ 	svcExitProcess();
++#elif defined(__EMSCRIPTEN__)
++	abort();
+ #else
+ 	__builtin_trap();
+ #endif

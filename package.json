@@ -1,5 +1,8 @@
 {
   "dependencies": {
     "playwright": "^1.58.2"
+  },
+  "devDependencies": {
+    "pngjs": "^7.0.0"
   }
 }
