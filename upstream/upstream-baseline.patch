@@ -1,0 +1,301 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 878b5d5..c1bc3ea 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -186,60 +186,88 @@ if(NINTENDO_SWITCH)
+ 		IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
+ 
+ elseif(LIBRETRO)
+-	add_library(${PROJECT_NAME} SHARED core/emulator.cpp)
+-	if(APPLE)
+-		if(NOT IOS)
+-			set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-undefined,error")
+-		endif()
+-		set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/shell/libretro/libretro.osx.def")
++	if(EMSCRIPTEN)
++		# Emscripten: static library (object files archived later for linking with EmulatorJS RetroArch)
++		add_library(${PROJECT_NAME} STATIC core/emulator.cpp)
++		target_compile_definitions(${PROJECT_NAME} PRIVATE
++			LIBRETRO TARGET_NO_REC
++			GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3 HAVE_OIT)
++		target_compile_options(${PROJECT_NAME} PRIVATE -fexceptions)
++		set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "flycast_libretro_emscripten")
++		# Disable features incompatible with WASM
++		set(USE_VULKAN OFF CACHE BOOL "Force vulkan off" FORCE)
++		set(USE_DX9 OFF CACHE BOOL "Force DX9 off" FORCE)
++		set(USE_DX11 OFF CACHE BOOL "Force DX11 off" FORCE)
++		set(USE_OPENMP OFF CACHE BOOL "Force OpenMP off" FORCE)
++		set(USE_BREAKPAD OFF CACHE BOOL "Force breakpad off" FORCE)
++		set(USE_LUA OFF CACHE BOOL "Force Lua off" FORCE)
++		set(USE_DISCORD OFF CACHE BOOL "Force Discord off" FORCE)
++		# Use GLES3 path for GL symbol loading
++		set(USE_GLES ON CACHE BOOL "Force GLES for Emscripten" FORCE)
++		# asio: disable threads (WASM is single-threaded)
++		target_compile_definitions(${PROJECT_NAME} PRIVATE
++			ASIO_DISABLE_THREADS
++			ASIO_DISABLE_LOCAL_SOCKETS
++			ASIO_DISABLE_SERIAL_PORT)
+ 	else()
+-		if(NOT CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
+-			set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
+-		endif()
+-	endif()
+-	set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "flycast_libretro"
+-	  XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
+-	  XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
+-    )
+-	set(CMAKE_SHARED_LIBRARY_PREFIX "")
+-	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+-	target_compile_definitions(${PROJECT_NAME} PRIVATE LIBRETRO)
+-	if(APPLE)
+-		find_library(FOUNDATION Foundation)
+-		target_link_libraries(${PROJECT_NAME} PRIVATE ${FOUNDATION})
+-	endif()
+-	if(ANDROID OR USE_GLES)
+-		target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3 HAVE_OIT)
+-    elseif(IOS)
+-		target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3)
+-		find_library(OPENGLES OpenGLES)
+-		find_library(GLKIT GLKit)
+-		target_link_libraries(${PROJECT_NAME} PRIVATE ${OPENGLES} ${GLKIT})
+-	elseif(USE_GLES2)
+-		target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES2 HAVE_OPENGLES HAVE_OPENGLES2)
+-		if(USE_VIDEOCORE)
+-			target_compile_definitions(${PROJECT_NAME} PRIVATE TARGET_NO_STENCIL)
+-			target_link_libraries(${PROJECT_NAME} PRIVATE "-lbrcmGLESv2")
+-			target_link_directories(${PROJECT_NAME} PRIVATE "/opt/vc/lib")
++		add_library(${PROJECT_NAME} SHARED core/emulator.cpp)
++		if(APPLE)
++			if(NOT IOS)
++				set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-undefined,error")
++			endif()
++			set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/shell/libretro/libretro.osx.def")
+ 		else()
+-			target_link_libraries(${PROJECT_NAME} PRIVATE "-lGLESv2")
+-		endif()
+-	elseif(USE_OPENGL)
+-		if (CMAKE_SYSTEM_NAME MATCHES "FreeBSD|OpenBSD|NetBSD")
+-			find_package(OpenGL REQUIRED)
+-			if(CMAKE_VERSION VERSION_LESS 3.29.0)
+-				target_include_directories(${PROJECT_NAME} PRIVATE ${OPENGL_INCLUDE_DIR})
+-			else()
+-				target_include_directories(${PROJECT_NAME} PRIVATE ${OPENGL_INCLUDE_DIRS})
++			if(NOT CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
++				set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
+ 			endif()
+ 		endif()
+-		target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_OPENGL)
++		set(CMAKE_SHARED_LIBRARY_PREFIX "")
++		target_compile_definitions(${PROJECT_NAME} PRIVATE LIBRETRO)
+ 		if(APPLE)
+-			set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-framework,OpenGL")
+-		else()
+-			target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_OIT)
++			find_library(FOUNDATION Foundation)
++			target_link_libraries(${PROJECT_NAME} PRIVATE ${FOUNDATION})
++		endif()
++		if(ANDROID OR USE_GLES)
++			target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3 HAVE_OIT)
++		elseif(IOS)
++			target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3)
++			find_library(OPENGLES OpenGLES)
++			find_library(GLKIT GLKit)
++			target_link_libraries(${PROJECT_NAME} PRIVATE ${OPENGLES} ${GLKIT})
++		elseif(USE_GLES2)
++			target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES2 HAVE_OPENGLES HAVE_OPENGLES2)
++			if(USE_VIDEOCORE)
++				target_compile_definitions(${PROJECT_NAME} PRIVATE TARGET_NO_STENCIL)
++				target_link_libraries(${PROJECT_NAME} PRIVATE "-lbrcmGLESv2")
++				target_link_directories(${PROJECT_NAME} PRIVATE "/opt/vc/lib")
++			else()
++				target_link_libraries(${PROJECT_NAME} PRIVATE "-lGLESv2")
++			endif()
++		elseif(USE_OPENGL)
++			if (CMAKE_SYSTEM_NAME MATCHES "FreeBSD|OpenBSD|NetBSD")
++				find_package(OpenGL REQUIRED)
++				if(CMAKE_VERSION VERSION_LESS 3.29.0)
++					target_include_directories(${PROJECT_NAME} PRIVATE ${OPENGL_INCLUDE_DIR})
++				else()
++					target_include_directories(${PROJECT_NAME} PRIVATE ${OPENGL_INCLUDE_DIRS})
++				endif()
++			endif()
++			target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_OPENGL)
++			if(APPLE)
++				set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-framework,OpenGL")
++			else()
++				target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_OIT)
++			endif()
+ 		endif()
+ 	endif()
++	if(NOT EMSCRIPTEN)
++		set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "flycast_libretro"
++		  XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
++		  XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
++		)
++		set(CMAKE_SHARED_LIBRARY_PREFIX "")
++	endif()
++	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+ elseif(ANDROID)
+ 	add_library(${PROJECT_NAME} SHARED core/emulator.cpp)
+ 	set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_RELEASE} -O3")
+@@ -1333,7 +1361,6 @@ if("x86" IN_LIST ARCHITECTURE OR "x86_64" IN_LIST ARCHITECTURE)
+ 			core/rec-x64/x64_regalloc.h)
+ 	endif()
+ endif()
+-
+ if((USE_OPENGL OR USE_GLES2 OR USE_GLES) AND NOT LIBRETRO)
+ 	add_library(glad STATIC core/deps/glad/src/gl.c)
+ 	if(NOT APPLE AND NOT WIN32 AND NOT SDL2_FOUND)
+diff --git a/core/build.h b/core/build.h
+index 6ea5355..8041f7b 100755
+--- a/core/build.h
++++ b/core/build.h
+@@ -17,6 +17,7 @@
+ #define CPU_ARM      0x20000002
+ #define CPU_ARM64    0x20000003
+ #define CPU_X64      0x20000004
++#define CPU_GENERIC  0x20000005
+ 
+ //FEAT_SHREC, FEAT_AREC, FEAT_DSPREC
+ #define DYNAREC_NONE	0x40000001
+@@ -24,7 +25,10 @@
+ 
+ //automatic
+ 
+-#if defined(__x86_64__) || defined(_M_X64)
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	#define HOST_CPU CPU_GENERIC
++	#define TARGET_NO_REC
++#elif defined(__x86_64__) || defined(_M_X64)
+ 	#define HOST_CPU CPU_X64
+ #elif defined(__i386__) || defined(_M_IX86)
+ 	#define HOST_CPU CPU_X86
+diff --git a/core/hw/sh4/sh4_core_regs.cpp b/core/hw/sh4/sh4_core_regs.cpp
+index 7542f13..bfaec7d 100644
+--- a/core/hw/sh4/sh4_core_regs.cpp
++++ b/core/hw/sh4/sh4_core_regs.cpp
+@@ -120,6 +120,10 @@ static void setHostRoundingMode(u32 roundingMode, u32 denorm2zero)
+                 : "r"(off_mask), "r"(on_mask)
+ 				: "x10"
+             );
++    #elif defined(__EMSCRIPTEN__) || defined(__wasm__) || HOST_CPU == CPU_GENERIC
++		// WASM/generic: no hardware FPU control — rounding mode is not configurable
++		(void)roundingMode;
++		(void)denorm2zero;
+     #else
+ 	#error "SetFloatStatusReg: Unsupported platform"
+     #endif
+diff --git a/core/linux/context.cpp b/core/linux/context.cpp
+index 461ff26..a8ba32c 100644
+--- a/core/linux/context.cpp
++++ b/core/linux/context.cpp
+@@ -130,6 +130,10 @@ static void context_segfault(host_context_t* hostctx, void* segfault_ctx)
+     #else
+         #error "Unsupported OS"
+ 	#endif
++#elif HOST_CPU == CPU_GENERIC
++	// No segfault context handling for generic/WASM platform (interpreter only)
++	(void)hostctx;
++	(void)segfault_ctx;
+ #else
+ 	#error Unsupported HOST_CPU
+ #endif
+diff --git a/core/linux/posix_vmem.cpp b/core/linux/posix_vmem.cpp
+index 4610515..3e9d01a 100644
+--- a/core/linux/posix_vmem.cpp
++++ b/core/linux/posix_vmem.cpp
+@@ -4,7 +4,7 @@
+ // Android and OSX since they are slightly different in some areas.
+ #include "types.h"
+ 
+-#ifndef __SWITCH__
++#if !defined(__SWITCH__) && !defined(__EMSCRIPTEN__)
+ #include <sys/mman.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -326,7 +326,34 @@ void release_jit_block(void *code_area1, void *code_area2, size_t size)
+ 
+ } // namespace virtmem
+ 
+-#endif // !__SWITCH__
++#endif // !__SWITCH__ && !__EMSCRIPTEN__
++
++#ifdef __EMSCRIPTEN__
++// Emscripten: no mmap/shm_open/mprotect support.
++// All virtmem functions are no-ops. addrspace::initMappings() will use
++// the malloc-based fallback path when virtmem::init() returns false.
++#include "hw/mem/addrspace.h"
++#include "hw/sh4/sh4_if.h"
++#include "oslib/virtmem.h"
++
++namespace virtmem
++{
++
++bool region_lock(void *start, size_t len) { return true; }
++bool region_unlock(void *start, size_t len) { return true; }
++bool region_set_exec(void *start, size_t len) { return true; }
++bool init(void **vmem_base_addr, void **sh4rcb_addr, size_t ramSize) { return false; }
++void destroy() {}
++void reset_mem(void *ptr, unsigned size_bytes) { memset(ptr, 0, size_bytes); }
++void ondemand_page(void *address, unsigned size_bytes) {}
++void create_mappings(const Mapping *vmem_maps, unsigned nummaps) {}
++bool prepare_jit_block(void *code_area, size_t size, void **code_area_rwx) { return false; }
++bool prepare_jit_block(void *code_area, size_t size, void **code_area_rw, ptrdiff_t *rx_offset) { return false; }
++void release_jit_block(void *code_area, size_t size) {}
++void release_jit_block(void *code_area1, void *code_area2, size_t size) {}
++
++} // namespace virtmem
++#endif // __EMSCRIPTEN__
+ 
+ namespace virtmem
+ {
+diff --git a/shell/cmake/DetectArchitecture.cmake b/shell/cmake/DetectArchitecture.cmake
+index 9a4b855..031fd86 100644
+--- a/shell/cmake/DetectArchitecture.cmake
++++ b/shell/cmake/DetectArchitecture.cmake
+@@ -21,6 +21,9 @@ function(detect_architecture symbol arch)
+     endif()
+ endfunction()
+ 
++detect_architecture("__EMSCRIPTEN__" wasm32)
++detect_architecture("__wasm__" wasm32)
++
+ detect_architecture("__ARM64__" arm64)
+ detect_architecture("__aarch64__" arm64)
+ detect_architecture("_M_ARM64" arm64)
+diff --git a/shell/libretro/libretro.cpp b/shell/libretro/libretro.cpp
+index 9dcc6b3..c25e579 100644
+--- a/shell/libretro/libretro.cpp
++++ b/shell/libretro/libretro.cpp
+@@ -3579,16 +3579,14 @@ static void retro_keyboard_event(bool down, unsigned keycode, uint32_t character
+ 
+ void fatal_error(const char* text, ...)
+ {
++	va_list args;
++	char temp[2048];
++	va_start(args, text);
++	vsprintf(temp, text, args);
++	va_end(args);
++	strcat(temp, "\n");
+ 	if (log_cb)
+-	{
+-		va_list args;
+-		char temp[2048];
+-		va_start(args, text);
+-		vsprintf(temp, text, args);
+-		va_end(args);
+-		strcat(temp, "\n");
+ 		log_cb(RETRO_LOG_ERROR, temp);
+-	}
+ }
+ 
+ [[noreturn]] void os_DebugBreak()
+@@ -3597,6 +3595,8 @@ void fatal_error(const char* text, ...)
+ 	//exit(-1);
+ #ifdef __SWITCH__
+ 	svcExitProcess();
++#elif defined(__EMSCRIPTEN__)
++	abort();
+ #else
+ 	__builtin_trap();
+ #endif

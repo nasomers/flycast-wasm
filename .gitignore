@@ -22,6 +22,20 @@ desktop.ini
 CLAUDE.md
 flycast-wasm-sharing-guide.md
 
+# Upstream port — source clone and build artifacts (huge)
+upstream/source/
+upstream/*.js
+!upstream/flycast-wasm-test.js
+upstream/*.wasm
+upstream/*.data
+upstream/*.log
+upstream/*.txt
+upstream/*.png
+upstream/*.json
+upstream_pkg/
+flycast_libretro_upstream.*
+UPSTREAM_PORT_LOG.md
+
 # Editor
 .vscode/
 .idea/
