@@ -698,7 +698,7 @@ extern u32 g_wasm_block_count;
 // #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
 // Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
 // which made per-instruction cycle charging always active in ref_execute_block.
-#define EXECUTOR_MODE 4
+#define EXECUTOR_MODE 1
 #define SHIL_START_BLOCK 2360000
 
 // Reference executor: per-instruction via OpPtr
@@ -1400,7 +1400,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		state_hash3 = 0;
 	}
 	// Per-block trace in the divergence range to find exact diverging block
-	if (g_wasm_block_count >= 2360000 && g_wasm_block_count < 2360200) {
+	if (g_wasm_block_count >= 2360000 && g_wasm_block_count < 2361000) {
 		EM_ASM({ console.log('[BLK-DETAIL] #' + $0 +
 			' pc=0x' + ($1>>>0).toString(16) +
 			' cc=' + ($2|0) +
