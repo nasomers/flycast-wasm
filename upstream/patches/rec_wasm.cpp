@@ -228,7 +228,9 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 
 	// Per-op trace for diverging block #2360476 at pc=0x8c00b8e4
 #ifdef __EMSCRIPTEN__
-	bool trace_this = (g_wasm_block_count == 2360476 && block_vaddr == 0x8c00b8e4);
+	// BLK-DETAIL #2360476 = execution count 2360475 (post-increment offset)
+	// The diverging block starts at pc=0x8c00b996 (from BLK-DETAIL #2360475 next-pc)
+	bool trace_this = (g_wasm_block_count == 2360475 && block_vaddr == 0x8c00b996);
 	u32 r0_before = ctx.r[0];
 	(void)r0_before;
 	if (trace_this) {
@@ -1696,8 +1698,9 @@ public:
 				compiledCount, failCount, block->vaddr,
 				(int)block->oplist.size());
 		}
-		// Dump full oplist for the diverging block at PC 0x8c00b8e4
-		if (block->vaddr == 0x8c00b8e4) {
+		// Dump full oplist for the ACTUAL diverging block at PC 0x8c00b996
+		// (and 0x8c00b8e4 which is the epilogue that reads the different value)
+		if (block->vaddr == 0x8c00b996 || block->vaddr == 0x8c00b8e4) {
 			EM_ASM({ console.log('[OPLIST-DUMP] pc=0x8c00b8e4 nops=' + $0 +
 				' guest_cycles=' + $1 + ' guest_opcodes=' + $2 +
 				' bt=' + $3 + ' sh4_size=' + $4); },
