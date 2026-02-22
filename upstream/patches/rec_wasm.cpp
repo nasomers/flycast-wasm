@@ -774,7 +774,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 4
+#define EXECUTOR_MODE 1
 
 static u32 pc_hash = 0;
 u32 g_wasm_block_count = 0;  // global so pvr_regs.cpp can reference it
@@ -1059,6 +1059,41 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 #endif
 
 #ifdef __EMSCRIPTEN__
+	// Track visits to the critical PCs where FB_R_CTRL writes happen
+	{
+		static u32 visits_da5a8 = 0;
+		static u32 visits_db58a = 0;
+		static u32 visits_da9e4 = 0;  // STARTRENDER PC
+		if (block->vaddr == 0x8c0da5a8) {
+			visits_da5a8++;
+			if (visits_da5a8 <= 10)
+				EM_ASM({ console.log('[KEY-PC] 0x8c0da5a8 visit #' + $0 +
+					' blk=' + $1 + ' r0=0x' + ($2>>>0).toString(16) +
+					' cc=' + ($3|0)); },
+					visits_da5a8, g_wasm_block_count, ctx.r[0], ctx.cycle_counter);
+		}
+		if (block->vaddr == 0x8c0db58a) {
+			visits_db58a++;
+			if (visits_db58a <= 20)
+				EM_ASM({ console.log('[KEY-PC] 0x8c0db58a visit #' + $0 +
+					' blk=' + $1 + ' r0=0x' + ($2>>>0).toString(16)); },
+					visits_db58a, g_wasm_block_count, ctx.r[0]);
+		}
+		if (block->vaddr == 0x8c0da9e4) {
+			visits_da9e4++;
+			if (visits_da9e4 <= 10)
+				EM_ASM({ console.log('[KEY-PC] 0x8c0da9e4 (STARTRENDER) visit #' + $0 +
+					' blk=' + $1); },
+					visits_da9e4, g_wasm_block_count);
+		}
+		// Summary at checkpoints
+		if (g_wasm_block_count % 5000000 == 0 && g_wasm_block_count > 0) {
+			EM_ASM({ console.log('[KEY-PC-SUM] blk=' + $0 +
+				' da5a8=' + $1 + ' db58a=' + $2 + ' da9e4=' + $3); },
+				g_wasm_block_count, visits_da5a8, visits_db58a, visits_da9e4);
+		}
+	}
+
 	// CC-SUMMARY for ALL modes
 	if (g_wasm_block_count == 100000 || g_wasm_block_count == 500000 || g_wasm_block_count == 1000000 ||
 	    g_wasm_block_count == 2000000 || g_wasm_block_count == 2360000 || g_wasm_block_count == 2360114) {
