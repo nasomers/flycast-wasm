@@ -176,18 +176,6 @@ index 6ea5355..8e25ad1 100755
  	#define HOST_CPU CPU_X64
  #elif defined(__i386__) || defined(_M_IX86)
  	#define HOST_CPU CPU_X86
-diff --git a/core/deps/DreamPicoPort-API b/core/deps/DreamPicoPort-API
---- a/core/deps/DreamPicoPort-API
-+++ b/core/deps/DreamPicoPort-API
-@@ -1 +1 @@
--Subproject commit e06d9f6c59833fc7bb7f2a33c960614489811ef8
-+Subproject commit e06d9f6c59833fc7bb7f2a33c960614489811ef8-dirty
-diff --git a/core/deps/SDL b/core/deps/SDL
---- a/core/deps/SDL
-+++ b/core/deps/SDL
-@@ -1 +1 @@
--Subproject commit 00d4f1c2c4ad2dc95d26b18743541f57b1dca56d
-+Subproject commit 00d4f1c2c4ad2dc95d26b18743541f57b1dca56d-dirty
 diff --git a/core/hw/mem/addrspace.cpp b/core/hw/mem/addrspace.cpp
 index c08cb8e..fd1756b 100644
 --- a/core/hw/mem/addrspace.cpp
@@ -500,3 +488,86 @@ index 143d093..5b72309 100644
  #define DECLARE_CODE_CACHE(Name, Size) static u8 *Name;
  #elif defined(__ANDROID__)
  #define DECLARE_CODE_CACHE(Name, Size) alignas(4096) static u8 Name[Size];
+diff --git a/shell/cmake/DetectArchitecture.cmake b/shell/cmake/DetectArchitecture.cmake
+index 9a4b855..031fd86 100644
+--- a/shell/cmake/DetectArchitecture.cmake
++++ b/shell/cmake/DetectArchitecture.cmake
+@@ -21,6 +21,9 @@ function(detect_architecture symbol arch)
+     endif()
+ endfunction()
+ 
++detect_architecture("__EMSCRIPTEN__" wasm32)
++detect_architecture("__wasm__" wasm32)
++
+ detect_architecture("__ARM64__" arm64)
+ detect_architecture("__aarch64__" arm64)
+ detect_architecture("_M_ARM64" arm64)
+diff --git a/shell/libretro/libretro.cpp b/shell/libretro/libretro.cpp
+index 9dcc6b3..effec5f 100644
+--- a/shell/libretro/libretro.cpp
++++ b/shell/libretro/libretro.cpp
+@@ -18,6 +18,9 @@
+ #include <cstdarg>
+ #include <math.h>
+ #include "types.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #ifndef _WIN32
+ #include <sys/time.h>
+ #endif
+@@ -1275,6 +1278,22 @@ void retro_run()
+ 		environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avinfo);
+ 	}
+ 
++#ifdef __EMSCRIPTEN__
++	{
++		static int videocb_count = 0;
++		static int first_non_dupe = 0;
++		videocb_count++;
++		if (!is_dupe && first_non_dupe == 0) {
++			first_non_dupe = videocb_count;
++			EM_ASM({ console.log('[retro] FIRST REAL FRAME at video_cb #' + $0 + ' w=' + $1 + ' h=' + $2); },
++				videocb_count, framebufferWidth, framebufferHeight);
++		}
++		if (videocb_count <= 5 || (videocb_count % 10) == 0) {
++			EM_ASM({ console.log('[retro] video_cb #' + $0 + ': is_dupe=' + $1 + ' w=' + $2 + ' h=' + $3); },
++				videocb_count, is_dupe ? 1 : 0, framebufferWidth, framebufferHeight);
++		}
++	}
++#endif
+ 	video_cb(is_dupe ? 0 : RETRO_HW_FRAME_BUFFER_VALID, framebufferWidth, framebufferHeight, 0);
+ 
+ 	if (!config::ThreadedRendering || config::LimitFPS)
+@@ -3579,16 +3598,14 @@ static void retro_keyboard_event(bool down, unsigned keycode, uint32_t character
+ 
+ void fatal_error(const char* text, ...)
+ {
++	va_list args;
++	char temp[2048];
++	va_start(args, text);
++	vsprintf(temp, text, args);
++	va_end(args);
++	strcat(temp, "\n");
+ 	if (log_cb)
+-	{
+-		va_list args;
+-		char temp[2048];
+-		va_start(args, text);
+-		vsprintf(temp, text, args);
+-		va_end(args);
+-		strcat(temp, "\n");
+ 		log_cb(RETRO_LOG_ERROR, temp);
+-	}
+ }
+ 
+ [[noreturn]] void os_DebugBreak()
+@@ -3597,6 +3614,8 @@ void fatal_error(const char* text, ...)
+ 	//exit(-1);
+ #ifdef __SWITCH__
+ 	svcExitProcess();
++#elif defined(__EMSCRIPTEN__)
++	abort();
+ #else
+ 	__builtin_trap();
+ #endif

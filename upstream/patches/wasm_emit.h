@@ -94,11 +94,9 @@ static inline void emitStoreRdF32(WasmModuleBuilder& b, const shil_param& rd) {
 // ============================================================
 static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
                         RuntimeBlockInfo* block, u32 opIndex) {
-	// DIAGNOSTIC: Force all ops to use SHIL fallback handler
-	// If BIOS renders with this, the bug is in a WASM emitter.
-	// If still black, bug is in block exit / prologue.
+	// DIAGNOSTIC: Force ALL ops through SHIL_FB to test WASM infrastructure
+	// (cycle counting + block exit). If still FAIL_BLACK, bug is in infrastructure.
 	return false;
-	(void)b; (void)op; (void)block; (void)opIndex;
 	switch (op.op) {
 
 	// ---- Tier 1: Integer ALU ----
@@ -283,14 +281,14 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 		return true;
 
 	case shop_xtrct:
-		// rd = (rs1 << 16) | (rs2 >> 16)
+		// rd = (rs1 >> 16) | (rs2 << 16)  — matches canonical/C++ fallback
 		b.op_local_get(LOCAL_CTX);
 		emitLoadParam(b, op.rs1);
 		b.op_i32_const(16);
-		b.op_i32_shl();
+		b.op_i32_shr_u();
 		emitLoadParam(b, op.rs2);
 		b.op_i32_const(16);
-		b.op_i32_shr_u();
+		b.op_i32_shl();
 		b.op_i32_or();
 		emitStoreRd(b, op.rd);
 		return true;

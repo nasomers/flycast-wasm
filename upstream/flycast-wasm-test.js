@@ -33,7 +33,7 @@ const { PNG } = require('pngjs');
 
 // === Config ===
 const PROJECT_DIR = 'C:\\DEV Projects\\flycast-wasm';
-const ROM_DIR = 'D:\\Gaming\\ROMs\\Dreamcast';
+const ROM_DIR = 'C:\\DEV Projects\\flycast-wasm\\demo\\roms';
 const SERVER_PORT = 3001;
 const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
 const TEST_DURATION_MS = 30000;
@@ -393,6 +393,26 @@ async function runTest() {
     console.log(`[harness] Results: ${resultsPath}`);
     console.log(`[harness] Console:  ${consolePath}`);
     console.log(`[harness] Screenshot: ${screenshotPath}`);
+
+    // === POST-TEST CHECKLIST (MANDATORY — follow every step) ===
+    const ntfyMsg = `${status}: ${status === 'PASS' ? `${visual.nonBlackRatio}% pixels, ${visual.uniqueColors} colors, ${behavior.mainloopExits} exits` : (failureReasons[0] || 'unknown')}`;
+    console.log('');
+    console.log('[checklist] ========================================');
+    console.log('[checklist]  POST-TEST CHECKLIST (DO ALL OF THESE)');
+    console.log('[checklist] ========================================');
+    console.log(`[checklist] [ ] 1. Send ntfy notification:`);
+    console.log(`[checklist]        curl -d "${ntfyMsg}" ntfy.sh/ccagent-ghostlaboratory`);
+    console.log(`[checklist] [ ] 2. Read test-screenshot.png — VISUALLY CONFIRM (even on PASS)`);
+    console.log(`[checklist] [ ] 3. If FAIL: read test-console.log for crash/error details`);
+    console.log(`[checklist] [ ] 4. If source changed: regenerate patches`);
+    console.log(`[checklist]        cd upstream/source && git diff -- CMakeLists.txt core/ shell/ > ../patches/wasm-jit-phase1-modified.patch`);
+    console.log(`[checklist]        cp core/rec-wasm/rec_wasm.cpp ../patches/rec_wasm.cpp`);
+    console.log(`[checklist] [ ] 5. Git commit + push if meaningful progress:`);
+    console.log(`[checklist]        git add upstream/patches/ upstream/flycast-wasm-test.js upstream/link.sh`);
+    console.log(`[checklist]        git commit -m "type: description"`);
+    console.log(`[checklist]        git push  (on milestones / PASS / end of session)`);
+    console.log(`[checklist] [ ] 6. Update memory files if milestone reached`);
+    console.log('[checklist] ========================================');
 
     return results;
 
