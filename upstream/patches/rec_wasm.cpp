@@ -546,10 +546,11 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 	case shop_ifb: {
 		if (op.rs1._imm)
 			ctx.pc = op.rs2._imm;
-		// Let OpPtr modify cycle_counter naturally during the block (matching
-		// ref_execute_block behavior in mode 4). The caller resets cycle_counter
-		// to cc_pre - guest_cycles after all ops, so these modifications don't
-		// persist across blocks but ARE visible to I/O reads within the block.
+		// Save/restore cycle_counter around OpPtr to prevent side effects from
+		// OpPtr's internal cycle charging (which would crash if left unchecked).
+		// This means SHIL doesn't match ref's mid-block cycle_counter evolution,
+		// but cycle_counter timing has been proven NOT the cause of divergence.
+		int saved_cc = ctx.cycle_counter;
 		try {
 			if (ctx.sr.FD == 1 && OpDesc[op.rs3._imm]->IsFloatingPoint())
 				throw SH4ThrownException(ctx.pc - 2, Sh4Ex_FpuDisabled);
@@ -559,6 +560,7 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 			g_ifb_exception_epc = ex.epc;
 			g_ifb_exception_expEvn = ex.expEvn;
 		}
+		ctx.cycle_counter = saved_cc;
 		break;
 	}
 	case shop_swaplb: {
@@ -1098,20 +1100,15 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 	}
 #else
-	// SHIL executor — match mode 4's cycle_counter behavior exactly.
-	// 1. Charge guest_cycles upfront (same as mode 4)
-	// 2. Execute SHIL ops — shop_ifb lets OpPtr modify cycle_counter freely
-	//    (no save/restore), so I/O reads mid-block see accurate timing
-	// 3. Force cycle_counter to cc_pre - guest_cycles after the block
-	//    (same as mode 4), so OpPtr's intra-block modifications don't leak
+	// SHIL executor — charge guest_cycles upfront, save/restore in shop_ifb.
+	// Timing experiments proved cycle_counter is NOT the cause of divergence.
+	// The bug is in SHIL op computation itself.
 	{
-		int cc_pre = ctx.cycle_counter;
 		ctx.cycle_counter -= block->guest_cycles;
 		g_ifb_exception_pending = false;
 		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
 		applyBlockExitCpp(block);
-		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
 			g_ifb_exception_pending = false;
