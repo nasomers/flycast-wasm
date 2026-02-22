@@ -8,6 +8,7 @@
 #include "hw/sh4/dyna/shil.h"
 #include "hw/sh4/dyna/blockmanager.h"
 #include "hw/sh4/dyna/decoder.h"
+#include <unordered_map>
 
 // Import function indices (must match the order in rec_wasm.cpp buildModule)
 enum WasmImportFunc : u32 {
@@ -41,6 +42,69 @@ namespace ctx_off {
 constexpr u32 LOCAL_CTX = 0;
 constexpr u32 LOCAL_RAM = 1;
 constexpr u32 LOCAL_TMP = 2;
+
+// ============================================================
+// Register Cache — maps Sh4Context offsets to WASM locals
+// ============================================================
+// Caches frequently-used integer registers in WASM locals instead
+// of loading/storing from linear memory every op. V8 maps locals
+// directly to CPU registers (essentially free) vs i32.load/store
+// which go through the linear memory path (3-5x slower).
+
+struct RegCacheEntry {
+	u32 wasmLocal;   // WASM local index (starting at 3)
+	bool dirty;      // needs writeback at block exit
+};
+
+struct RegCache {
+	std::unordered_map<u32, RegCacheEntry> entries;  // key = ctx offset
+	u32 nextLocal = 3;  // first available (0=ctx, 1=ram, 2=tmp)
+
+	void addOffset(u32 offset) {
+		if (entries.find(offset) == entries.end()) {
+			RegCacheEntry e;
+			e.wasmLocal = nextLocal++;
+			e.dirty = false;
+			entries[offset] = e;
+		}
+	}
+
+	// Pre-scan: walk oplist, find all referenced integer registers
+	void scanBlock(RuntimeBlockInfo* block) {
+		for (size_t i = 0; i < block->oplist.size(); i++) {
+			const shil_opcode& op = block->oplist[i];
+			if (op.rs1.is_r32i()) addOffset(op.rs1.reg_offset());
+			if (op.rs2.is_r32i()) addOffset(op.rs2.reg_offset());
+			if (op.rs3.is_r32i()) addOffset(op.rs3.reg_offset());
+			if (op.rd.is_r32i())  addOffset(op.rd.reg_offset());
+			if (op.rd2.is_r32i()) addOffset(op.rd2.reg_offset());
+			// shop_jdyn writes to JDYN (not a register param)
+			if (op.op == shop_jdyn) addOffset(ctx_off::JDYN);
+			// shop_jcond writes to SR_T (usually found via comparison rd too)
+			if (op.op == shop_jcond) addOffset(ctx_off::SR_T);
+		}
+		// Block exit may read sr.T or jdyn
+		u32 bcls = BET_GET_CLS(block->BlockType);
+		if (bcls == BET_CLS_COND) addOffset(ctx_off::SR_T);
+		if (bcls == BET_CLS_Dynamic) addOffset(ctx_off::JDYN);
+	}
+
+	// Lookup: returns WASM local index or -1 if not cached
+	s32 getLocal(u32 ctxOffset) const {
+		auto it = entries.find(ctxOffset);
+		if (it != entries.end()) return (s32)it->second.wasmLocal;
+		return -1;
+	}
+
+	// Mark dirty (for stores)
+	void markDirty(u32 ctxOffset) {
+		auto it = entries.find(ctxOffset);
+		if (it != entries.end()) it->second.dirty = true;
+	}
+
+	// Number of allocated cache locals
+	u32 localCount() const { return nextLocal - 3; }
+};
 
 // ============================================================
 // Helper: load a value from a shil_param onto the WASM stack
@@ -91,176 +155,264 @@ static inline void emitStoreRdF32(WasmModuleBuilder& b, const shil_param& rd) {
 }
 
 // ============================================================
+// Cache-aware load: use local.get if cached, else memory load
+// ============================================================
+static inline void emitLoadParamCached(WasmModuleBuilder& b, const shil_param& p, const RegCache& cache) {
+	if (p.is_imm()) {
+		b.op_i32_const((s32)p._imm);
+	} else if (p.is_r32i()) {
+		s32 local = cache.getLocal(p.reg_offset());
+		if (local >= 0) {
+			b.op_local_get((u32)local);
+		} else {
+			b.op_local_get(LOCAL_CTX);
+			b.op_i32_load(p.reg_offset());
+		}
+	} else if (p.is_r32f()) {
+		// Float: not cached in V1, fall through to memory
+		b.op_local_get(LOCAL_CTX);
+		b.op_i32_load(p.reg_offset());
+	}
+}
+
+// ============================================================
+// Cache-aware store helpers for i32 destinations
+// ============================================================
+// emitPreStore: push ctx_ptr only if rd is NOT cached
+// emitPostStore: local.set if cached, i32.store if not
+// Must be paired: emitPreStore before value computation, emitPostStore after.
+
+static inline void emitPreStore(WasmModuleBuilder& b, const shil_param& rd, const RegCache& cache) {
+	if (rd.is_r32i()) {
+		s32 local = cache.getLocal(rd.reg_offset());
+		if (local >= 0) return;  // cached: no ctx_ptr needed
+	}
+	b.op_local_get(LOCAL_CTX);
+}
+
+static inline void emitPostStore(WasmModuleBuilder& b, const shil_param& rd, RegCache& cache) {
+	if (rd.is_r32i()) {
+		s32 local = cache.getLocal(rd.reg_offset());
+		if (local >= 0) {
+			b.op_local_set((u32)local);
+			cache.markDirty(rd.reg_offset());
+			return;
+		}
+	}
+	b.op_i32_store(rd.reg_offset());
+}
+
+// Offset-based variants for fixed ctx fields (jdyn, sr.T)
+static inline void emitPreStoreOffset(WasmModuleBuilder& b, u32 offset, const RegCache& cache) {
+	if (cache.getLocal(offset) >= 0) return;
+	b.op_local_get(LOCAL_CTX);
+}
+
+static inline void emitPostStoreOffset(WasmModuleBuilder& b, u32 offset, RegCache& cache) {
+	s32 local = cache.getLocal(offset);
+	if (local >= 0) {
+		b.op_local_set((u32)local);
+		cache.markDirty(offset);
+	} else {
+		b.op_i32_store(offset);
+	}
+}
+
+// ============================================================
+// Flush/reload all cached registers
+// ============================================================
+// Flush: write all dirty cached locals back to ctx memory
+static inline void emitFlushAll(WasmModuleBuilder& b, RegCache& cache) {
+	for (auto& [offset, entry] : cache.entries) {
+		if (entry.dirty) {
+			b.op_local_get(LOCAL_CTX);
+			b.op_local_get(entry.wasmLocal);
+			b.op_i32_store(offset);
+			entry.dirty = false;
+		}
+	}
+}
+
+// Reload: load all cached registers from ctx memory (after C++ fallback call)
+static inline void emitReloadAll(WasmModuleBuilder& b, RegCache& cache) {
+	for (auto& [offset, entry] : cache.entries) {
+		b.op_local_get(LOCAL_CTX);
+		b.op_i32_load(offset);
+		b.op_local_set(entry.wasmLocal);
+		entry.dirty = false;
+	}
+}
+
+// ============================================================
 // Emit a complete SHIL op. Returns true if handled, false if
 // fallback is needed.
 // ============================================================
 static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
-                        RuntimeBlockInfo* block, u32 opIndex) {
+                        RuntimeBlockInfo* block, u32 opIndex, RegCache& cache) {
 	switch (op.op) {
 
 	// ---- Tier 1: Integer ALU ----
 
 	case shop_mov32:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitStoreRd(b, op.rd);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_add:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_add();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_sub:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_sub();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_and:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_and();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_or:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_or();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_xor:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_xor();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_not:
 		// rd = ~rs1 = rs1 XOR -1
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
 		b.op_i32_const(-1);
 		b.op_i32_xor();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_neg:
 		// rd = 0 - rs1
-		b.op_local_get(LOCAL_CTX);
+		emitPreStore(b, op.rd, cache);
 		b.op_i32_const(0);
-		emitLoadParam(b, op.rs1);
+		emitLoadParamCached(b, op.rs1, cache);
 		b.op_i32_sub();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_shl:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_shl();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_shr:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_shr_u();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_sar:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_shr_s();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_ror:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_rotr();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_ext_s8:
 		// Sign-extend 8→32: (val << 24) >> 24
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
 		b.op_i32_const(24);
 		b.op_i32_shl();
 		b.op_i32_const(24);
 		b.op_i32_shr_s();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_ext_s16:
 		// Sign-extend 16→32: (val << 16) >> 16
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
 		b.op_i32_const(16);
 		b.op_i32_shl();
 		b.op_i32_const(16);
 		b.op_i32_shr_s();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_mul_u16:
 		// rd = (u16)rs1 * (u16)rs2
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
 		b.op_i32_const(0xFFFF);
 		b.op_i32_and();
-		emitLoadParam(b, op.rs2);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_const(0xFFFF);
 		b.op_i32_and();
 		b.op_i32_mul();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_mul_s16:
 		// rd = (s16)rs1 * (s16)rs2
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
 		b.op_i32_const(16);
 		b.op_i32_shl();
 		b.op_i32_const(16);
 		b.op_i32_shr_s();
-		emitLoadParam(b, op.rs2);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_const(16);
 		b.op_i32_shl();
 		b.op_i32_const(16);
 		b.op_i32_shr_s();
 		b.op_i32_mul();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_mul_i32:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_mul();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_swaplb:
 		// Swap low bytes: ((val >> 8) & 0xFF) | ((val & 0xFF) << 8) | (val & 0xFFFF0000)
-		// Simplified: rotate16 of lower 16 bits, keep upper 16
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
 		b.op_local_tee(LOCAL_TMP);
 		b.op_i32_const(8);
 		b.op_i32_shr_u();
@@ -276,121 +428,120 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 		b.op_i32_const((s32)0xFFFF0000u);
 		b.op_i32_and();
 		b.op_i32_or();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_xtrct:
-		// rd = (rs1 >> 16) | (rs2 << 16)  — matches canonical/C++ fallback
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
+		// rd = (rs1 >> 16) | (rs2 << 16)
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
 		b.op_i32_const(16);
 		b.op_i32_shr_u();
-		emitLoadParam(b, op.rs2);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_const(16);
 		b.op_i32_shl();
 		b.op_i32_or();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	// ---- Comparisons ----
 
 	case shop_test:
 		// rd = (rs1 & rs2) == 0
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_and();
 		b.op_i32_eqz();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_seteq:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_eq();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_setge:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_ge_s();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_setgt:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_gt_s();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_setae:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_ge_u();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_setab:
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		emitLoadParam(b, op.rs2);
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_gt_u();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	// ---- Dynamic jump / conditional ----
 
 	case shop_jdyn:
-		// Store jump target to ctx.jdyn
-		// jdyn = rs1 (+ rs2 if present, e.g., bsrf Rn → jdyn = Rn + PC+4)
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
+		// Store jump target to jdyn (cached or memory)
+		emitPreStoreOffset(b, ctx_off::JDYN, cache);
+		emitLoadParamCached(b, op.rs1, cache);
 		if (!op.rs2.is_null()) {
-			emitLoadParam(b, op.rs2);
+			emitLoadParamCached(b, op.rs2, cache);
 			b.op_i32_add();
 		}
-		b.op_i32_store(ctx_off::JDYN);
+		emitPostStoreOffset(b, ctx_off::JDYN, cache);
 		return true;
 
 	case shop_jcond:
-		// Store condition to ctx.sr.T
-		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
-		b.op_i32_store(ctx_off::SR_T);
+		// Store condition to sr.T (cached or memory)
+		emitPreStoreOffset(b, ctx_off::SR_T, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitPostStoreOffset(b, ctx_off::SR_T, cache);
 		return true;
 
 	// ---- Memory operations ----
 
 	case shop_readm: {
 		// Compute address: rs1 + rs3 (if rs3 not null), store in LOCAL_TMP
-		emitLoadParam(b, op.rs1);
+		emitLoadParamCached(b, op.rs1, cache);
 		if (!op.rs3.is_null()) {
-			emitLoadParam(b, op.rs3);
+			emitLoadParamCached(b, op.rs3, cache);
 			b.op_i32_add();
 		}
 		b.op_local_set(LOCAL_TMP);
 
 		if (op.size == 8) {
-			// 64-bit read: two 32-bit reads (always use imports for simplicity)
+			// 64-bit read: two 32-bit reads (float pairs, not cached)
 			b.op_local_get(LOCAL_TMP);
 			b.op_call(WIMPORT_READ32);
 			{
 				u32 off = op.rd.reg_offset();
-				b.op_local_set(LOCAL_TMP); // reuse for result
+				b.op_local_set(LOCAL_TMP);
 				b.op_local_get(LOCAL_CTX);
 				b.op_local_get(LOCAL_TMP);
 				b.op_i32_store(off);
 			}
 			// High word: recompute address
-			emitLoadParam(b, op.rs1);
+			emitLoadParamCached(b, op.rs1, cache);
 			if (!op.rs3.is_null()) {
-				emitLoadParam(b, op.rs3);
+				emitLoadParamCached(b, op.rs3, cache);
 				b.op_i32_add();
 			}
 			b.op_i32_const(4);
@@ -404,41 +555,38 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 				b.op_i32_store(off);
 			}
 		} else {
-			// 1/2/4-byte read: direct RAM fast path for area 3 (0x0C-0x0F)
-			// Dreamcast RAM is 16MB at physical 0x0C000000, mirrored through 0x0FFFFFFF.
-			// Check: (phys >> 26) == 3  (area 3 = system RAM)
-			// Fast path: i32.load8_s/i32.load16_s/i32.load at ram_base + (phys & 0x00FFFFFF)
-			b.op_local_get(LOCAL_CTX);  // push ctx for final store
+			// 1/2/4-byte read: direct RAM fast path for area 3
+			emitPreStore(b, op.rd, cache);  // push ctx only if rd not cached
 
 			b.op_local_get(LOCAL_TMP);
 			b.op_i32_const(0x1FFFFFFF);
-			b.op_i32_and();             // phys = addr & 0x1FFFFFFF
-			b.op_local_tee(LOCAL_TMP);  // save phys
+			b.op_i32_and();
+			b.op_local_tee(LOCAL_TMP);
 
 			b.op_i32_const(26);
-			b.op_i32_shr_u();          // area = phys >> 26
+			b.op_i32_shr_u();
 			b.op_i32_const(3);
-			b.op_i32_eq();             // is_ram = (area == 3)
+			b.op_i32_eq();
 
-			b.op_if(WASM_TYPE_I32);    // if (is_ram) → produces i32
+			b.op_if(WASM_TYPE_I32);
 			{
 				b.op_local_get(LOCAL_RAM);
 				b.op_local_get(LOCAL_TMP);
 				b.op_i32_const(0x00FFFFFF);
 				b.op_i32_and();
-				b.op_i32_add();        // heap_addr = ram_base + (phys & 0x00FFFFFF)
+				b.op_i32_add();
 				switch (op.size) {
-				case 1: b.op_i32_load8_s(0); break;   // sign-extend 8→32
-				case 2: b.op_i32_load16_s(0); break;   // sign-extend 16→32
-				default: b.op_i32_load(0); break;       // plain 32-bit
+				case 1: b.op_i32_load8_s(0); break;
+				case 2: b.op_i32_load16_s(0); break;
+				default: b.op_i32_load(0); break;
 				}
 			}
 			b.op_else();
 			{
 				// Slow path: recompute original addr, call import
-				emitLoadParam(b, op.rs1);
+				emitLoadParamCached(b, op.rs1, cache);
 				if (!op.rs3.is_null()) {
-					emitLoadParam(b, op.rs3);
+					emitLoadParamCached(b, op.rs3, cache);
 					b.op_i32_add();
 				}
 				u32 readFunc;
@@ -451,29 +599,26 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 			}
 			b.op_end();
 
-			b.op_i32_store(op.rd.reg_offset());
+			emitPostStore(b, op.rd, cache);
 		}
 		return true;
 	}
 
 	case shop_writem: {
 		if (op.size == 8) {
-			// 64-bit write: two 32-bit writes
-			// Write low word
-			emitLoadParam(b, op.rs1);
+			// 64-bit write: two 32-bit writes (float pairs)
+			emitLoadParamCached(b, op.rs1, cache);
 			if (!op.rs3.is_null()) {
-				emitLoadParam(b, op.rs3);
+				emitLoadParamCached(b, op.rs3, cache);
 				b.op_i32_add();
 			}
-			// Load low word from rs2
 			b.op_local_get(LOCAL_CTX);
 			b.op_i32_load(op.rs2.reg_offset());
 			b.op_call(WIMPORT_WRITE32);
 
-			// Write high word (addr + 4)
-			emitLoadParam(b, op.rs1);
+			emitLoadParamCached(b, op.rs1, cache);
 			if (!op.rs3.is_null()) {
-				emitLoadParam(b, op.rs3);
+				emitLoadParamCached(b, op.rs3, cache);
 				b.op_i32_add();
 			}
 			b.op_i32_const(4);
@@ -482,32 +627,32 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 			b.op_i32_load(op.rs2.reg_offset() + 4);
 			b.op_call(WIMPORT_WRITE32);
 		} else {
-			// 1/2/4-byte write: direct RAM fast path for area 3 (0x0C-0x0F)
-			emitLoadParam(b, op.rs1);
+			// 1/2/4-byte write: direct RAM fast path for area 3
+			emitLoadParamCached(b, op.rs1, cache);
 			if (!op.rs3.is_null()) {
-				emitLoadParam(b, op.rs3);
+				emitLoadParamCached(b, op.rs3, cache);
 				b.op_i32_add();
 			}
-			b.op_local_set(LOCAL_TMP);  // LOCAL_TMP = original addr
+			b.op_local_set(LOCAL_TMP);
 
 			b.op_local_get(LOCAL_TMP);
 			b.op_i32_const(0x1FFFFFFF);
-			b.op_i32_and();             // phys = addr & 0x1FFFFFFF
-			b.op_local_tee(LOCAL_TMP);  // LOCAL_TMP = phys
+			b.op_i32_and();
+			b.op_local_tee(LOCAL_TMP);
 
 			b.op_i32_const(26);
-			b.op_i32_shr_u();          // area = phys >> 26
+			b.op_i32_shr_u();
 			b.op_i32_const(3);
-			b.op_i32_eq();             // is_ram = (area == 3)
+			b.op_i32_eq();
 
-			b.op_if();                 // void if (is_ram)
+			b.op_if();
 			{
 				b.op_local_get(LOCAL_RAM);
 				b.op_local_get(LOCAL_TMP);
 				b.op_i32_const(0x00FFFFFF);
 				b.op_i32_and();
-				b.op_i32_add();        // heap_addr = ram_base + (phys & 0x00FFFFFF)
-				emitLoadParam(b, op.rs2);
+				b.op_i32_add();
+				emitLoadParamCached(b, op.rs2, cache);
 				switch (op.size) {
 				case 1: b.op_i32_store8(0); break;
 				case 2: b.op_i32_store16(0); break;
@@ -516,13 +661,12 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 			}
 			b.op_else();
 			{
-				// Slow path: recompute original addr, call import
-				emitLoadParam(b, op.rs1);
+				emitLoadParamCached(b, op.rs1, cache);
 				if (!op.rs3.is_null()) {
-					emitLoadParam(b, op.rs3);
+					emitLoadParamCached(b, op.rs3, cache);
 					b.op_i32_add();
 				}
-				emitLoadParam(b, op.rs2);
+				emitLoadParamCached(b, op.rs2, cache);
 				u32 writeFunc;
 				switch (op.size) {
 				case 1: writeFunc = WIMPORT_WRITE8; break;
@@ -539,19 +683,20 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 	// ---- Interpreter fallback (single SH4 opcode) ----
 
 	case shop_ifb:
-		// rs1._imm: if nonzero, set ctx.pc = rs2._imm before executing
+		// Flush cache: ifb can modify arbitrary ctx state
+		emitFlushAll(b, cache);
 		if (op.rs1._imm) {
 			b.op_local_get(LOCAL_CTX);
 			b.op_i32_const((s32)op.rs2._imm);
 			b.op_i32_store(ctx_off::PC);
 		}
-		// Call ifb(opcode, pc)
-		b.op_i32_const((s32)op.rs3._imm);  // SH4 opcode
+		b.op_i32_const((s32)op.rs3._imm);
 		b.op_i32_const((s32)(block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0)));
 		b.op_call(WIMPORT_IFB);
+		emitReloadAll(b, cache);
 		return true;
 
-	// ---- Tier 2: FPU ops ----
+	// ---- Tier 2: FPU ops (float regs not cached in V1) ----
 
 	case shop_fadd:
 		b.op_local_get(LOCAL_CTX);
@@ -607,57 +752,50 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 		return true;
 
 	case shop_fseteq:
-		// rd = (rs1 == rs2) ? 1 : 0
-		b.op_local_get(LOCAL_CTX);
+		// rd(i32) = (rs1 == rs2) ? 1 : 0
+		emitPreStore(b, op.rd, cache);
 		emitLoadParamF32(b, op.rs1);
 		emitLoadParamF32(b, op.rs2);
 		b.op_f32_eq();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_fsetgt:
-		// rd = (rs1 > rs2) ? 1 : 0
-		b.op_local_get(LOCAL_CTX);
+		// rd(i32) = (rs1 > rs2) ? 1 : 0
+		emitPreStore(b, op.rd, cache);
 		emitLoadParamF32(b, op.rs1);
 		emitLoadParamF32(b, op.rs2);
 		b.op_f32_gt();
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_cvt_i2f_n:
 	case shop_cvt_i2f_z:
-		// rd(f32) = (float)(s32)rs1
+		// rd(f32) = (float)(s32)rs1 — i32 source cached, f32 dest not
 		b.op_local_get(LOCAL_CTX);
-		emitLoadParam(b, op.rs1);
+		emitLoadParamCached(b, op.rs1, cache);
 		b.op_f32_convert_i32_s();
 		emitStoreRdF32(b, op.rd);
 		return true;
 
 	case shop_cvt_f2i_t:
-		// rd(i32) = (s32)rs1(f32)  — truncate toward zero
-		// Need to handle NaN and overflow per SH4 semantics
-		// For now, use WASM trunc with a simple fallback
-		b.op_local_get(LOCAL_CTX);
+		// rd(i32) = (s32)rs1(f32) — f32 source not cached, i32 dest cached
+		emitPreStore(b, op.rd, cache);
 		emitLoadParamF32(b, op.rs1);
-		// Use trunc_sat instead of trunc to avoid trapping on NaN/overflow
-		// WASM trunc_f32_s traps on NaN — we need saturating version
-		// Saturating: 0xFC 0x00 (i32.trunc_sat_f32_s)
 		b.emitByte(0xFC);
 		b.emitLEB128(0x00); // i32.trunc_sat_f32_s
-		emitStoreRd(b, op.rd);
+		emitPostStore(b, op.rd, cache);
 		return true;
 
 	case shop_mov64:
-		// Copy 64 bits (two 32-bit values) from rs1 to rd
+		// Copy 64 bits (float register pairs, not cached)
 		if (op.rs1.is_reg() && op.rd.is_reg()) {
 			u32 srcOff = op.rs1.reg_offset();
 			u32 dstOff = op.rd.reg_offset();
-			// Copy first word
 			b.op_local_get(LOCAL_CTX);
 			b.op_local_get(LOCAL_CTX);
 			b.op_i32_load(srcOff);
 			b.op_i32_store(dstOff);
-			// Copy second word
 			b.op_local_get(LOCAL_CTX);
 			b.op_local_get(LOCAL_CTX);
 			b.op_i32_load(srcOff + 4);
@@ -666,14 +804,15 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 		}
 		return false;
 
-	// ---- System ops that need fallback ----
+	// ---- System ops that need fallback (flush+reload around call) ----
 	case shop_sync_sr:
 	case shop_sync_fpscr:
 	case shop_pref:
-		// These need the full C++ implementation
+		emitFlushAll(b, cache);
 		b.op_i32_const((s32)block->vaddr);
 		b.op_i32_const((s32)opIndex);
 		b.op_call(WIMPORT_SHIL_FB);
+		emitReloadAll(b, cache);
 		return true;
 
 	default:
@@ -684,32 +823,35 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 // ============================================================
 // Emit block exit code based on BlockEndType
 // ============================================================
-static void emitBlockExit(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
+static void emitBlockExit(WasmModuleBuilder& b, RuntimeBlockInfo* block, const RegCache& cache) {
 	u32 bcls = BET_GET_CLS(block->BlockType);
 
 	switch (bcls) {
 	case BET_CLS_Static:
 		if (block->BlockType == BET_StaticIntr) {
-			// ctx.pc = NextBlock
 			b.op_local_get(LOCAL_CTX);
 			b.op_i32_const((s32)block->NextBlock);
 			b.op_i32_store(ctx_off::PC);
 		} else {
-			// ctx.pc = BranchBlock
 			b.op_local_get(LOCAL_CTX);
 			b.op_i32_const((s32)block->BranchBlock);
 			b.op_i32_store(ctx_off::PC);
 		}
 		break;
 
-	case BET_CLS_Dynamic:
-		// ctx.pc = ctx.jdyn — all dynamic exits use jdyn
-		// (shop_jdyn already stored the target, even for RTS which copies PR→jdyn)
+	case BET_CLS_Dynamic: {
+		// ctx.pc = jdyn — read from cached local if available
 		b.op_local_get(LOCAL_CTX);
-		b.op_local_get(LOCAL_CTX);
-		b.op_i32_load(ctx_off::JDYN);
+		s32 jdynLocal = cache.getLocal(ctx_off::JDYN);
+		if (jdynLocal >= 0) {
+			b.op_local_get((u32)jdynLocal);
+		} else {
+			b.op_local_get(LOCAL_CTX);
+			b.op_i32_load(ctx_off::JDYN);
+		}
 		b.op_i32_store(ctx_off::PC);
 		break;
+	}
 
 	case BET_CLS_COND: {
 		// if (sr.T == cond) pc = BranchBlock else pc = NextBlock
@@ -717,13 +859,17 @@ static void emitBlockExit(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 
 		b.op_local_get(LOCAL_CTX);  // base for store
 
-		b.op_local_get(LOCAL_CTX);
-		b.op_i32_load(ctx_off::SR_T);
+		// Read sr.T from cached local if available
+		s32 srTLocal = cache.getLocal(ctx_off::SR_T);
+		if (srTLocal >= 0) {
+			b.op_local_get((u32)srTLocal);
+		} else {
+			b.op_local_get(LOCAL_CTX);
+			b.op_i32_load(ctx_off::SR_T);
+		}
 		if (cond == 1) {
-			// T == 1: branch taken
 			b.op_if(WASM_TYPE_I32);
 		} else {
-			// T == 0: branch taken
 			b.op_i32_eqz();
 			b.op_if(WASM_TYPE_I32);
 		}

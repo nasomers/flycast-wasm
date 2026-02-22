@@ -1485,6 +1485,10 @@ static int wasm_slice_trap_pc() { return 0; }
 // ============================================================
 
 static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
+	// Pre-scan for register usage — allocate WASM locals for cached regs
+	RegCache cache;
+	cache.scanBlock(block);
+
 	b.emitHeader();
 
 	// Type section: 3 function signatures
@@ -1529,12 +1533,20 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	b.beginCodeSection(1);
 	b.beginFuncBody();
 
-	// Locals: 1 temp i32
-	u32 lc = 1;
+	// Locals: 1 temp i32 + N cached register i32s
+	u32 totalExtraLocals = 1 + cache.localCount();
+	u32 lc = totalExtraLocals;
 	u8 lt = WASM_TYPE_I32;
 	b.emitLocals(1, &lc, &lt);
 
-	// Prologue: cycle_counter -= guest_cycles (matches C++ SHIL mode 6)
+	// Prologue: load cached registers from ctx memory into WASM locals
+	for (auto& [offset, entry] : cache.entries) {
+		b.op_local_get(LOCAL_CTX);
+		b.op_i32_load(offset);
+		b.op_local_set(entry.wasmLocal);
+	}
+
+	// Prologue: cycle_counter -= guest_cycles
 	b.op_local_get(LOCAL_CTX);
 	b.op_local_get(LOCAL_CTX);
 	b.op_i32_load(ctx_off::CYCLE_COUNTER);
@@ -1542,22 +1554,27 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	b.op_i32_sub();
 	b.op_i32_store(ctx_off::CYCLE_COUNTER);
 
-	// Emit each SHIL op
+	// Emit each SHIL op with register cache
 	for (u32 i = 0; i < block->oplist.size(); i++) {
 		shil_opcode& op = block->oplist[i];
-		if (!emitShilOp(b, op, block, i)) {
+		if (!emitShilOp(b, op, block, i, cache)) {
 			prof_fallback_ops_compiled++;
-			// Unhandled op — call SHIL canonical fallback
+			// Unhandled op — flush, call fallback, reload
+			emitFlushAll(b, cache);
 			b.op_i32_const((s32)block->vaddr);
 			b.op_i32_const((s32)i);
 			b.op_call(WIMPORT_SHIL_FB);
+			emitReloadAll(b, cache);
 		} else {
 			prof_native_ops_compiled++;
 		}
 	}
 
-	// Epilogue: set next PC
-	emitBlockExit(b, block);
+	// Epilogue: block exit reads sr.T/jdyn from cached locals
+	emitBlockExit(b, block, cache);
+
+	// Epilogue: writeback all dirty cached registers to ctx memory
+	emitFlushAll(b, cache);
 
 	b.endFuncBody();
 	b.endSection();
