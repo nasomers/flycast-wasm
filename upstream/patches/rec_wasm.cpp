@@ -1058,19 +1058,19 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 	}
 #else
-	// SHIL executor — charge guest_opcodes (not guest_cycles).
+	// SHIL executor — charge guest_opcodes upfront, let natural penalties accumulate.
 	//
-	// ref_execute_block charges flat -1 per loop iteration via #if EXECUTOR_MODE==0.
-	// This is approximately equal to guest_opcodes (number of SH4 instructions).
-	// guest_cycles uses SH4 timing tables (countCycles) and doesn't match the
-	// flat -1 model. Using guest_opcodes reduces accumulated timing drift.
+	// Key insight: DO NOT force-reset cycle_counter after SHIL execution.
+	// SHIL memory ops (shop_readm/writem) go through the SH4 cache subsystem
+	// which calls addReadAccessCycles/addWriteAccessCycles, naturally modifying
+	// cycle_counter. Force-resetting would UNDO these natural penalties,
+	// causing accumulated timing drift vs the ref executor.
 	{
-		int cc_pre = ctx.cycle_counter;
 		ctx.cycle_counter -= block->guest_opcodes;
 		g_ifb_exception_pending = false;
 		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
-		ctx.cycle_counter = cc_pre - (int)block->guest_opcodes;
+		// NO forced reset — let natural cache/memory penalties stick.
 		applyBlockExitCpp(block);
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
