@@ -774,7 +774,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 5
+#define EXECUTOR_MODE 1
 
 static u32 pc_hash = 0;
 static u32 block_count = 0;
@@ -1060,7 +1060,6 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 
 #ifdef __EMSCRIPTEN__
 	// CC-SUMMARY for ALL modes
-#if EXECUTOR_MODE != 1
 	if (block_count == 100000 || block_count == 500000 || block_count == 1000000 ||
 	    block_count == 2000000 || block_count == 2360000 || block_count == 2360114) {
 		EM_ASM({ console.log('[CC-SUMMARY] blk=' + $0 +
@@ -1068,7 +1067,6 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			' mode=' + $2); },
 			block_count, ctx.cycle_counter, EXECUTOR_MODE);
 	}
-#endif
 #if EXECUTOR_MODE == 5
 	if (block_count == 1000 || block_count == 10000 || block_count == 100000 ||
 	    block_count == 500000 || block_count == 1000000 || block_count == 2000000) {
@@ -1078,7 +1076,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			block_count, shadow_match_count, shadow_mismatch_count);
 	}
 #endif
-#if EXECUTOR_MODE == 6 || EXECUTOR_MODE == 4 || EXECUTOR_MODE == 5
+#if EXECUTOR_MODE == 6 || EXECUTOR_MODE == 4 || EXECUTOR_MODE == 5 || EXECUTOR_MODE == 1
 	if (block_count == 500000 || block_count == 1000000 || block_count == 2000000 ||
 	    block_count == 2500000 ||
 	    block_count == 5000000 || block_count == 10000000 ||
@@ -1151,12 +1149,8 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	state_hash3 = state_hash3 * 1000003u + sh3;
 
 #ifdef __EMSCRIPTEN__
-#if EXECUTOR_MODE == 5
-	// Finer-grained TRACE for shadow mode to narrow divergence window
+	// 500K TRACE intervals for all modes (comparing mode 1 vs mode 4 hashes)
 	bool should_log = (block_count % 500000 == 0);
-#else
-	bool should_log = (block_count % 5000000 == 0);
-#endif
 	if (should_log) {
 		EM_ASM({ console.log('[TRACE] blk=' + $0 +
 			' pc=0x' + ($1>>>0).toString(16) +
