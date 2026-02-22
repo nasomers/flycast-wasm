@@ -1276,6 +1276,17 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
 		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
+#ifdef __EMSCRIPTEN__
+		// Log r0 right after SHIL ops, before applyBlockExitCpp
+		if (g_wasm_block_count == 2360475) {
+			EM_ASM({ console.log('[SHIL-EXIT] blk=2360475' +
+				' vaddr=0x' + ($0>>>0).toString(16) +
+				' r0=0x' + ($1>>>0).toString(16) +
+				' pc=0x' + ($2>>>0).toString(16) +
+				' nops=' + $3); },
+				block->vaddr, ctx.r[0], ctx.pc, (u32)block->oplist.size());
+		}
+#endif
 		applyBlockExitCpp(block);
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
