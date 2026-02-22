@@ -1590,6 +1590,22 @@ public:
 
 	void compile(RuntimeBlockInfo* block, bool smc_checks, bool optimise) override
 	{
+		// Handle FPCB aliasing: SH4 address mirrors (0x0C/0x8C/0xAC) map to
+		// the same FPCB index. If a block from a different address already
+		// occupies this FPCB slot, discard it to prevent bm_AddBlock verify
+		// failure. Standard dynarec handles this via block-check code; we
+		// bypass FPCB dispatch entirely (JS cache uses exact PC).
+		{
+			RuntimeBlockInfoPtr aliased = bm_GetBlock(block->addr);
+			if (aliased) {
+				bm_DiscardBlock(aliased.get());
+				// Also remove from our caches
+				wasm_remove_block(aliased->vaddr);
+				blockByVaddr.erase(aliased->vaddr);
+				blockCodeHash.erase(aliased->vaddr);
+			}
+		}
+
 		blockByVaddr[block->vaddr] = block;
 
 		// Store hash for SMC detection (first 2 bytes of block code)
