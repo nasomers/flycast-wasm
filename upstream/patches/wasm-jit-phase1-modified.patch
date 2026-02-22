@@ -846,7 +846,7 @@ index 0538b3c..836d160 100644
 +	PT_ALPHA_REF        = 0x000000FF;
 +}
 diff --git a/core/hw/sh4/dyna/driver.cpp b/core/hw/sh4/dyna/driver.cpp
-index 4e1fbf3..8c6d102 100644
+index 4e1fbf3..4f61459 100644
 --- a/core/hw/sh4/dyna/driver.cpp
 +++ b/core/hw/sh4/dyna/driver.cpp
 @@ -1,6 +1,10 @@
@@ -871,17 +871,7 @@ index 4e1fbf3..8c6d102 100644
  constexpr u32 CODE_SIZE = 10_MB;
  constexpr u32 TEMP_CODE_SIZE = 1_MB;
  constexpr u32 FULL_SIZE = CODE_SIZE + TEMP_CODE_SIZE;
-@@ -74,6 +82,9 @@ void Sh4Recompiler::clear_temp_cache(bool full)
- 	//printf("recSh4:Temp Code Cache clear at %08X\n", curr_pc);
- 	codeBuffer.reset(true);
- 	bm_ResetTempCache(full);
-+	// Sync WASM JIT caches — JS block cache and blockByVaddr have stale entries
-+	// after temp blocks are evicted from the C++ block map
-+	sh4Dynarec->reset();
- }
- 
- void Sh4Recompiler::ResetCache()
-@@ -342,26 +353,54 @@ void Sh4Recompiler::Reset(bool hard)
+@@ -342,26 +350,54 @@ void Sh4Recompiler::Reset(bool hard)
  void Sh4Recompiler::Init()
  {
  	INFO_LOG(DYNAREC, "Sh4Recompiler::Init");
