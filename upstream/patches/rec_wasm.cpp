@@ -88,6 +88,12 @@ struct ShilWriteEntry {
 static std::vector<ShilWriteEntry> g_shil_writes;
 static bool g_shil_dry_run = false;
 
+// Write/read counters for diagnostic modes
+static u32 g_shil_write_count = 0;
+static u32 g_shil_read_count = 0;
+static u32 g_shil_pvr_write_count = 0;
+static u32 g_shil_sq_write_count = 0;
+
 // ============================================================
 // Memory access cycle penalties — approximates Sh4Cycles
 // ============================================================
@@ -206,7 +212,17 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 		break;
 	case shop_pref: {
 		u32 addr = readI32(op.rs1);
-		if ((addr >> 26) == 0x38) ctx.doSqWrite(addr, &ctx);
+		if ((addr >> 26) == 0x38) {
+			g_shil_sq_write_count++;
+#ifdef __EMSCRIPTEN__
+			if (g_shil_sq_write_count <= 20) {
+				EM_ASM({ console.log('[SQ-WR] #' + $0 +
+					' addr=0x' + ($1>>>0).toString(16)); },
+					g_shil_sq_write_count, addr);
+			}
+#endif
+			ctx.doSqWrite(addr, &ctx);
+		}
 		break;
 	}
 	// Integer ops with carry (64-bit result in rd, rd2)
@@ -433,6 +449,7 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 		u32 addr = readI32(op.rs1);
 		if (!op.rs3.is_null()) addr += readI32(op.rs3);
 		addMemReadPenalty(addr, op.size);
+		g_shil_read_count++;
 		if (op.size == 8) {
 			u32 doff = op.rd.reg_offset();
 			*(u32*)((u8*)&ctx + doff) = ReadMem32(addr);
@@ -450,6 +467,29 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 		u32 addr = readI32(op.rs1);
 		if (!op.rs3.is_null()) addr += readI32(op.rs3);
 		addMemWritePenalty(addr, op.size);
+		g_shil_write_count++;
+		// Track PVR MMIO writes (physical 0x005F8000-0x005F9FFF)
+		{
+			u32 phys = addr & 0x1FFFFFFF;
+			if (phys >= 0x005F8000 && phys <= 0x005F9FFF) {
+				g_shil_pvr_write_count++;
+#ifdef __EMSCRIPTEN__
+				if (g_shil_pvr_write_count <= 30) {
+					u32 val = 0;
+					if (op.size == 8) {
+						val = *(u32*)((u8*)&ctx + op.rs2.reg_offset());
+					} else {
+						val = readI32(op.rs2);
+					}
+					EM_ASM({ console.log('[PVR-WR] #' + $0 +
+						' addr=0x' + ($1>>>0).toString(16) +
+						' val=0x' + ($2>>>0).toString(16) +
+						' size=' + $3); },
+						g_shil_pvr_write_count, addr, val, op.size);
+				}
+#endif
+			}
+		}
 		if (g_shil_dry_run) {
 			// Dry run: capture intended writes, don't apply
 			ShilWriteEntry e;
@@ -708,7 +748,9 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 2 = ref + guest_opcodes upfront (known PASS)
 // 3 = hybrid (ref early, SHIL late)
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
-#define EXECUTOR_MODE 4
+// 5 = shadow comparison: ref first, then SHIL, compare registers
+// 6 = pure SHIL with PVR register monitoring + write counting
+#define EXECUTOR_MODE 6
 
 static u32 pc_hash = 0;
 static u32 block_count = 0;
@@ -718,6 +760,10 @@ static u32 state_hash3 = 0;
 static int cc_leak_total = 0;      // cumulative unexpected cc delta
 static u32 cc_leak_count = 0;      // number of blocks with leaks
 static u32 cc_leak_logged = 0;     // number of leak events logged (cap at 50)
+#if EXECUTOR_MODE == 5
+static u32 shadow_mismatch_count = 0;
+static u32 shadow_match_count = 0;
+#endif
 
 static void cpp_execute_block(RuntimeBlockInfo* block) {
 	Sh4Context& ctx = Sh4cntx;
@@ -791,6 +837,180 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		// Suppress OpPtr leak: force cycle_counter to pre - guest_cycles
 		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
 	}
+#elif EXECUTOR_MODE == 5
+	// SHADOW COMPARISON: run ref first (correct), then SHIL on same input.
+	// Ref writes to memory (correct). SHIL reads the same correct memory.
+	// Compare register output to find the first diverging block/op.
+	// Execution continues with ref's result (correct) so all subsequent
+	// blocks start from a known-good state.
+	{
+		// Save pre-block register state
+		alignas(16) static u8 ctx_backup_buf[sizeof(Sh4Context)];
+		Sh4Context& ctx_backup = *(Sh4Context*)ctx_backup_buf;
+		memcpy(&ctx_backup, &ctx, sizeof(Sh4Context));
+
+		// --- Run ref (known correct) ---
+		{
+			int cc_pre = ctx.cycle_counter;
+			ctx.cycle_counter -= block->guest_cycles;
+			ref_execute_block(block);
+			ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
+		}
+
+		// Save ref's result
+		alignas(16) static u8 ref_result_buf[sizeof(Sh4Context)];
+		Sh4Context& ref_result = *(Sh4Context*)ref_result_buf;
+		memcpy(&ref_result, &ctx, sizeof(Sh4Context));
+
+		// Restore pre-block registers for SHIL (memory keeps ref's writes)
+		memcpy(&ctx, &ctx_backup, sizeof(Sh4Context));
+
+		// --- Run SHIL ---
+		ctx.cycle_counter -= block->guest_cycles;
+		g_ifb_exception_pending = false;
+		for (u32 i = 0; i < block->oplist.size(); i++)
+			wasm_exec_shil_fb(block->vaddr, i);
+		applyBlockExitCpp(block);
+		if (g_ifb_exception_pending) {
+			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
+			g_ifb_exception_pending = false;
+		}
+
+		// Compare SHIL vs ref registers (skip cycle_counter)
+		if (shadow_mismatch_count < 30) {
+			bool match = true;
+			int diff_reg = -1;
+			const char* diff_name = "";
+			u32 shil_v = 0, ref_v = 0;
+
+#define CMP_REG(field, name) \
+	if (match && ctx.field != ref_result.field) { \
+		match = false; diff_name = name; \
+		shil_v = (u32)ctx.field; ref_v = (u32)ref_result.field; \
+	}
+#define CMP_REG_ARR(arr, count, name) \
+	if (match) for (int _i = 0; _i < (count); _i++) { \
+		if (*(u32*)&ctx.arr[_i] != *(u32*)&ref_result.arr[_i]) { \
+			match = false; diff_name = name; diff_reg = _i; \
+			shil_v = *(u32*)&ctx.arr[_i]; ref_v = *(u32*)&ref_result.arr[_i]; \
+			break; \
+		} \
+	}
+
+			CMP_REG(pc, "pc")
+			CMP_REG_ARR(r, 16, "r")
+			CMP_REG(sr.T, "sr.T")
+			CMP_REG(sr.status, "sr.status")
+			CMP_REG_ARR(fr, 16, "fr")
+			CMP_REG_ARR(xf, 16, "xf")
+			CMP_REG(mac.l, "mac.l")
+			CMP_REG(mac.h, "mac.h")
+			CMP_REG(pr, "pr")
+			CMP_REG(fpscr.full, "fpscr")
+			CMP_REG(gbr, "gbr")
+			CMP_REG(fpul, "fpul")
+			CMP_REG(jdyn, "jdyn")
+			CMP_REG_ARR(r_bank, 8, "r_bank")
+			CMP_REG(vbr, "vbr")
+			CMP_REG(ssr, "ssr")
+			CMP_REG(spc, "spc")
+			CMP_REG(sgr, "sgr")
+			CMP_REG(dbr, "dbr")
+			CMP_REG(sr.S, "sr.S")
+			CMP_REG(sr.IMASK, "sr.IMASK")
+			CMP_REG(sr.Q, "sr.Q")
+			CMP_REG(sr.M, "sr.M")
+			CMP_REG(sr.FD, "sr.FD")
+			CMP_REG(sr.BL, "sr.BL")
+			CMP_REG(sr.RB, "sr.RB")
+			CMP_REG(sr.MD, "sr.MD")
+
+#undef CMP_REG
+#undef CMP_REG_ARR
+
+			if (!match) {
+				shadow_mismatch_count++;
+#ifdef __EMSCRIPTEN__
+				EM_ASM({ console.log('[SHADOW] MISMATCH #' + $0 +
+					' blk=' + $1 +
+					' pc=0x' + ($2>>>0).toString(16) +
+					' diff=' + UTF8ToString($3) +
+					(($4 >= 0) ? ('[' + $4 + ']') : '') +
+					' shil=0x' + ($5>>>0).toString(16) +
+					' ref=0x' + ($6>>>0).toString(16) +
+					' nops=' + $7 +
+					' go=' + $8); },
+					shadow_mismatch_count, block_count, block->vaddr,
+					diff_name, diff_reg, shil_v, ref_v,
+					(u32)block->oplist.size(), block->guest_opcodes);
+
+				// For the first few mismatches, dump full register state
+				if (shadow_mismatch_count <= 5) {
+					EM_ASM({ console.log('[SHADOW-SHIL] r0=0x' + ($0>>>0).toString(16) +
+						' r1=0x' + ($1>>>0).toString(16) +
+						' r2=0x' + ($2>>>0).toString(16) +
+						' r3=0x' + ($3>>>0).toString(16) +
+						' r4=0x' + ($4>>>0).toString(16) +
+						' r5=0x' + ($5>>>0).toString(16) +
+						' r15=0x' + ($6>>>0).toString(16) +
+						' pc=0x' + ($7>>>0).toString(16) +
+						' T=' + $8 +
+						' pr=0x' + ($9>>>0).toString(16)); },
+						ctx.r[0], ctx.r[1], ctx.r[2],
+						ctx.r[3], ctx.r[4], ctx.r[5],
+						ctx.r[15], ctx.pc, ctx.sr.T, ctx.pr);
+					EM_ASM({ console.log('[SHADOW-REF]  r0=0x' + ($0>>>0).toString(16) +
+						' r1=0x' + ($1>>>0).toString(16) +
+						' r2=0x' + ($2>>>0).toString(16) +
+						' r3=0x' + ($3>>>0).toString(16) +
+						' r4=0x' + ($4>>>0).toString(16) +
+						' r5=0x' + ($5>>>0).toString(16) +
+						' r15=0x' + ($6>>>0).toString(16) +
+						' pc=0x' + ($7>>>0).toString(16) +
+						' T=' + $8 +
+						' pr=0x' + ($9>>>0).toString(16)); },
+						ref_result.r[0], ref_result.r[1], ref_result.r[2],
+						ref_result.r[3], ref_result.r[4], ref_result.r[5],
+						ref_result.r[15], ref_result.pc, ref_result.sr.T, ref_result.pr);
+
+					// Dump the SHIL ops for this block
+					for (u32 i = 0; i < block->oplist.size() && i < 30; i++) {
+						auto& sop = block->oplist[i];
+						EM_ASM({ console.log('[SHADOW-OP] [' + $0 + '] shop=' + $1 +
+							' rd_type=' + $2 + ' rd_off=0x' + ($3>>>0).toString(16) +
+							' rs1_type=' + $4 + ' rs1_off=0x' + ($5>>>0).toString(16) +
+							' rs2_type=' + $6 + ' rs3_type=' + $7 +
+							' size=' + $8 + ' imm1=' + $9); },
+							i, (int)sop.op,
+							(int)sop.rd.type, sop.rd.reg_offset(),
+							(int)sop.rs1.type, sop.rs1.reg_offset(),
+							(int)sop.rs2.type, (int)sop.rs3.type,
+							sop.size, sop.rs1._imm);
+					}
+				}
+#endif
+			} else {
+				shadow_match_count++;
+			}
+		}
+
+		// Always restore ref's result so execution continues correctly
+		memcpy(&ctx, &ref_result, sizeof(Sh4Context));
+	}
+#elif EXECUTOR_MODE == 6
+	// Pure SHIL with PVR monitoring + write counting.
+	// Identical to mode 1 but with diagnostics.
+	{
+		ctx.cycle_counter -= block->guest_cycles;
+		g_ifb_exception_pending = false;
+		for (u32 i = 0; i < block->oplist.size(); i++)
+			wasm_exec_shil_fb(block->vaddr, i);
+		applyBlockExitCpp(block);
+		if (g_ifb_exception_pending) {
+			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
+			g_ifb_exception_pending = false;
+		}
+	}
 #else
 	// Pure SHIL executor - charge guest_cycles BEFORE ops (like x64 JIT).
 	{
@@ -807,7 +1027,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 #endif
 
 #ifdef __EMSCRIPTEN__
-	// CC-SUMMARY for ALL modes (ref mode 2 doesn't have the SHIL block above)
+	// CC-SUMMARY for ALL modes
 #if EXECUTOR_MODE != 1
 	if (block_count == 100000 || block_count == 500000 || block_count == 1000000 ||
 	    block_count == 2000000 || block_count == 2360000 || block_count == 2360114) {
@@ -815,6 +1035,38 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			' cc=' + ($1|0) +
 			' mode=' + $2); },
 			block_count, ctx.cycle_counter, EXECUTOR_MODE);
+	}
+#endif
+#if EXECUTOR_MODE == 5
+	if (block_count == 1000 || block_count == 10000 || block_count == 100000 ||
+	    block_count == 500000 || block_count == 1000000 || block_count == 2000000) {
+		EM_ASM({ console.log('[SHADOW-SUM] at blk=' + $0 +
+			' match=' + $1 + ' mismatch=' + $2 +
+			' rate=' + (($1 > 0) ? (100.0 * $1 / ($1 + $2)).toFixed(2) : '0') + '%'); },
+			block_count, shadow_match_count, shadow_mismatch_count);
+	}
+#endif
+#if EXECUTOR_MODE == 6
+	if (block_count == 1000 || block_count == 10000 || block_count == 100000 ||
+	    block_count == 500000 || block_count == 1000000 || block_count == 2000000 ||
+	    block_count == 3000000 || block_count == 4000000) {
+		EM_ASM({ console.log('[SHIL-IO] blk=' + $0 +
+			' reads=' + $1 + ' writes=' + $2 +
+			' pvr_wr=' + $3 + ' sq_wr=' + $4); },
+			block_count, g_shil_read_count, g_shil_write_count,
+			g_shil_pvr_write_count, g_shil_sq_write_count);
+
+		// Read key PVR registers directly
+		u32 fb_w_ctrl = ReadMem32(0xA05F8048);
+		u32 spg_ctrl = ReadMem32(0xA05F80D0);
+		u32 vo_ctrl = ReadMem32(0xA05F80E8);
+		u32 fb_sof1 = ReadMem32(0xA05F8060);
+		EM_ASM({ console.log('[PVR-REG] blk=' + $0 +
+			' FB_W_CTRL=0x' + ($1>>>0).toString(16) +
+			' SPG_CTRL=0x' + ($2>>>0).toString(16) +
+			' VO_CTRL=0x' + ($3>>>0).toString(16) +
+			' FB_SOF1=0x' + ($4>>>0).toString(16)); },
+			block_count, fb_w_ctrl, spg_ctrl, vo_ctrl, fb_sof1);
 	}
 #endif
 #endif
