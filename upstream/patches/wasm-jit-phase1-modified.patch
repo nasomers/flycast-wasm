@@ -927,24 +927,6 @@ index 4e1fbf3..4f61459 100644
  }
  
  void Sh4Recompiler::Term()
-diff --git a/core/hw/sh4/dyna/shil.cpp b/core/hw/sh4/dyna/shil.cpp
-index 4ca6b6a..3f72db6 100644
---- a/core/hw/sh4/dyna/shil.cpp
-+++ b/core/hw/sh4/dyna/shil.cpp
-@@ -10,7 +10,13 @@
- void AnalyseBlock(RuntimeBlockInfo* blk)
- {
- 	SSAOptimizer optim(blk);
-+#ifdef __EMSCRIPTEN__
-+	// SSA BISECT: Full Optimize() = FAIL_BLACK. No Optimize() = PASS.
-+	// Calling Optimize() with selective pass disabling via ssa.cpp.
- 	optim.Optimize();
-+#else
-+	optim.Optimize();
-+#endif
- }
- 
- u32 getRegOffset(Sh4RegType reg)
 diff --git a/core/hw/sh4/dyna/shil_canonical.h b/core/hw/sh4/dyna/shil_canonical.h
 index a1be200..3727ab8 100644
 --- a/core/hw/sh4/dyna/shil_canonical.h
