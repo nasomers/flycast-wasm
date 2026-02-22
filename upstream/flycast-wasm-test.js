@@ -463,7 +463,7 @@ async function runTest() {
       ntfyLines.push(`Result: Black screen -BIOS did not render any graphics.`);
     } else if (status === 'FAIL_CRASH') {
       ntfyLines.push(`Result: Emulator crashed.`);
-      if (crashErrors.length > 0) ntfyLines.push(`Error: ${crashErrors[0].substring(0, 100)}`);
+      if (crashErrors.length > 0) ntfyLines.push(`Error: ${crashErrors[0].pattern.substring(0, 100)}`);
     } else if (status === 'FAIL_NO_VISUAL') {
       ntfyLines.push(`Result: Some pixels but no meaningful visual output.`);
     } else if (status === 'FAIL_BEHAVIOR') {
