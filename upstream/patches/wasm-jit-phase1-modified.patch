@@ -973,21 +973,43 @@ index a1be200..3727ab8 100644
  
  shil_compile
 diff --git a/core/hw/sh4/dyna/ssa.cpp b/core/hw/sh4/dyna/ssa.cpp
-index 85c1fdf..db7d7f5 100644
+index 85c1fdf..a933c1a 100644
 --- a/core/hw/sh4/dyna/ssa.cpp
 +++ b/core/hw/sh4/dyna/ssa.cpp
-@@ -41,6 +41,11 @@ void SSAOptimizer::Optimize()
- 	// This should only be done for ram/vram/aram access
- 	// Disabled for now and probably not worth the trouble
- 	//WriteAfterWritePass();
+@@ -262,6 +262,12 @@ bool SSAOptimizer::ExecuteConstOp(shil_opcode* op)
+ 
+ 		case shop_jdyn:
+ 			{
 +#ifdef __EMSCRIPTEN__
-+	// SSA BISECT: ConstPropPass only. If PASS → bug is in later passes.
-+	// If FAIL → bug is in ConstPropPass.
-+	return;
++				// WASM SHIL: Don't fold dynamic branches to static.
++				// applyBlockExitCpp uses BlockType, and folding can cause
++				// wrong targets when SHIL executes the modified oplist.
++				return false;
 +#endif
- 	DeadCodeRemovalPass();
- 	SimplifyExpressionPass();
- 	CombineShiftsPass();
+ 				verify(BET_GET_CLS(block->BlockType) == BET_CLS_Dynamic);
+ 				rs1 += rs2;
+ 				switch ((block->BlockType >> 1) & 3)
+@@ -293,6 +299,10 @@ bool SSAOptimizer::ExecuteConstOp(shil_opcode* op)
+ 			}
+ 		case shop_jcond:
+ 			{
++#ifdef __EMSCRIPTEN__
++				// WASM SHIL: Don't fold conditional branches to static.
++				return false;
++#endif
+ 				if (rs1 != (block->BlockType & 1))
+ 				{
+ 					block->BranchBlock = block->NextBlock;
+@@ -489,6 +499,9 @@ void SSAOptimizer::ConstPropPass()
+ 				// and if those pages are read-only, then we can directly read the memory at compile time
+ 				// and propagate the read value as a constant.
+ 				if (op.op == shop_readm  && block->read_only
++#ifdef __EMSCRIPTEN__
++						&& false  // WASM SHIL: disable compile-time readm folding
++#endif
+ 						&& (op.rs1._imm >> 12) >= (block->vaddr >> 12)
+ 						&& (op.rs1._imm >> 12) <= ((block->vaddr + block->sh4_code_size - 1) >> 12)
+ 						&& op.size <= 4)
 diff --git a/core/hw/sh4/sh4_core_regs.cpp b/core/hw/sh4/sh4_core_regs.cpp
 index 7542f13..bfaec7d 100644
 --- a/core/hw/sh4/sh4_core_regs.cpp
