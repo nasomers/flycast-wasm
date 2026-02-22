@@ -1055,12 +1055,30 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 	}
 #else
-	// SHIL executor — match mode 4's cycle_counter management:
-	// Let OpPtr modify cycle_counter naturally during block (for timing-dependent
-	// hardware register reads), then force it back at block end.
+	// SHIL executor with instruction fetch cache simulation.
+	// ref_execute_block (mode 4) calls IReadMem16 per instruction, which
+	// charges SH4 instruction cache miss penalties to cycle_counter.
+	// SHIL ops don't fetch instructions, so without pre-fetching,
+	// cycle_counter stays flat during block execution. Timer reads
+	// (TCNT0 etc.) are lazily computed from cycle_counter via now(),
+	// so the missing cache penalties cause timer values to diverge.
+	// Fix: pre-fetch all SH4 instructions before SHIL execution to
+	// charge the same instruction cache penalties as ref_execute_block.
 	{
 		int cc_pre = ctx.cycle_counter;
 		ctx.cycle_counter -= block->guest_cycles;
+
+		// Pre-fetch SH4 instructions — charges instruction cache miss
+		// penalties to cycle_counter, matching ref_execute_block's behavior
+		{
+			u32 pc_iter = block->vaddr;
+			u32 pc_end = block->vaddr + block->sh4_code_size;
+			while (pc_iter < pc_end) {
+				IReadMem16(pc_iter);
+				pc_iter += 2;
+			}
+		}
+
 		g_ifb_exception_pending = false;
 		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
