@@ -1007,14 +1007,18 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		memcpy(&ctx, &ref_result, sizeof(Sh4Context));
 	}
 #elif EXECUTOR_MODE == 6
-	// Pure SHIL with PVR monitoring + write counting.
-	// Identical to mode 1 but with diagnostics.
+	// Phase 2: Execute compiled WASM block (with diagnostic infrastructure)
 	{
-		ctx.cycle_counter -= block->guest_cycles;
 		g_ifb_exception_pending = false;
-		for (u32 i = 0; i < block->oplist.size(); i++)
-			wasm_exec_shil_fb(block->vaddr, i);
-		applyBlockExitCpp(block);
+		u32 ctx_ptr = (u32)(uintptr_t)&ctx;
+		int trap = wasm_execute_block(block->vaddr, ctx_ptr);
+		if (trap) {
+			// WASM trap — fallback to C++ SHIL
+			ctx.cycle_counter -= block->guest_cycles;
+			for (u32 i = 0; i < block->oplist.size(); i++)
+				wasm_exec_shil_fb(block->vaddr, i);
+			applyBlockExitCpp(block);
+		}
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
 			g_ifb_exception_pending = false;
@@ -1401,20 +1405,7 @@ public:
 						}
 
 						if (it != blockByVaddr.end()) {
-							// Phase 2: Execute compiled WASM block
-							g_ifb_exception_pending = false;
-							u32 ctx_ptr = (u32)(uintptr_t)sh4ctx;
-							int trap = wasm_execute_block(pc, ctx_ptr);
-							if (trap) {
-								// WASM execution failed — fall back to C++ SHIL
-								cpp_execute_block(it->second);
-							} else {
-								// Check for deferred IFB exceptions
-								if (g_ifb_exception_pending) {
-									Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
-									g_ifb_exception_pending = false;
-								}
-							}
+							cpp_execute_block(it->second);
 							blockExecs++;
 
 							if (sh4ctx->interrupt_pend)
