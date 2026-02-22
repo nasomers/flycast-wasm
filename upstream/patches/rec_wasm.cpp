@@ -112,6 +112,7 @@ static u32 g_shil_sq_write_count = 0;
 // ============================================================
 static u32 prof_native_ops_compiled = 0;   // SHIL ops compiled to native WASM
 static u32 prof_fallback_ops_compiled = 0; // SHIL ops compiled as C++ fallback
+static u32 prof_idle_loops_detected = 0;   // blocks detected as idle spin-wait loops
 static u32 prof_fb_by_op[128] = {};        // runtime fallback calls by op type
 static double prof_emulation_ms = 0;       // time in inner block dispatch loop
 static double prof_system_ms = 0;          // time in UpdateSystem_INTC
@@ -1489,6 +1490,19 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	RegCache cache;
 	cache.scanBlock(block);
 
+	// Idle loop detection: blocks that branch back to themselves
+	bool is_idle_loop = false;
+	u32 bcls = BET_GET_CLS(block->BlockType);
+	if (bcls == BET_CLS_Static && block->BlockType != BET_StaticIntr
+		&& block->BranchBlock == block->vaddr) {
+		is_idle_loop = true;
+	}
+	if (bcls == BET_CLS_COND
+		&& (block->BranchBlock == block->vaddr || block->NextBlock == block->vaddr)) {
+		is_idle_loop = true;
+	}
+	if (is_idle_loop) prof_idle_loops_detected++;
+
 	b.emitHeader();
 
 	// Type section: 3 function signatures
@@ -1575,6 +1589,27 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 
 	// Epilogue: writeback all dirty cached registers to ctx memory
 	emitFlushAll(b, cache);
+
+	// Idle loop fast-forward: set cycle_counter = 0 when looping back to self
+	if (is_idle_loop) {
+		if (bcls == BET_CLS_Static) {
+			// Unconditional self-loop: always fast-forward
+			b.op_local_get(LOCAL_CTX);
+			b.op_i32_const(0);
+			b.op_i32_store(ctx_off::CYCLE_COUNTER);
+		} else {
+			// Conditional self-loop: fast-forward only when branching back
+			b.op_local_get(LOCAL_CTX);
+			b.op_i32_load(ctx_off::PC);
+			b.op_i32_const((s32)block->vaddr);
+			b.op_i32_eq();
+			b.op_if(); // void block type (0x40)
+			b.op_local_get(LOCAL_CTX);
+			b.op_i32_const(0);
+			b.op_i32_store(ctx_off::CYCLE_COUNTER);
+			b.op_end();
+		}
+	}
 
 	b.endFuncBody();
 	b.endSection();
@@ -1818,6 +1853,7 @@ public:
 				console.log('Timeslices:       ' + ts.toLocaleString());
 				console.log('Blocks/timeslice: ' + (blks / ts).toFixed(1));
 				console.log('Blocks/ms:        ' + (blks / total).toFixed(1));
+				console.log('Idle loops:       ' + $15);
 				console.log('');
 				console.log('--- Op Coverage (compile-time) ---');
 				console.log('Native WASM ops:  ' + nativeOps.toLocaleString());
@@ -1844,7 +1880,8 @@ public:
 				avg_exec_us,         // $11 avgExecUs
 				est_exec_ms,         // $12 estExecMs
 				exec_samples,        // $13 execSamples
-				mainloop_count       // $14 mainloop#
+				mainloop_count,      // $14 mainloop#
+				prof_idle_loops_detected  // $15 idle loops
 			);
 
 			// Dump top fallback ops by frequency
