@@ -920,49 +920,6 @@ index a1be200..3727ab8 100644
  #endif
  
  shil_compile
-diff --git a/core/hw/sh4/modules/tmu.cpp b/core/hw/sh4/modules/tmu.cpp
-index 04e103d..a571bf9 100644
---- a/core/hw/sh4/modules/tmu.cpp
-+++ b/core/hw/sh4/modules/tmu.cpp
-@@ -7,6 +7,10 @@
- #include "hw/sh4/sh4_interrupts.h"
- #include "hw/sh4/sh4_mmr.h"
- #include "serialize.h"
-+#ifdef __EMSCRIPTEN__
-+#include <emscripten.h>
-+extern u32 g_wasm_block_count;
-+#endif
- 
- #define tmu_underflow 0x0100
- #define tmu_UNIE      0x0020
-@@ -65,6 +69,27 @@ template<u32 ch>
- static u32 read_TMU_TCNT(u32 addr)
- {
- 	s64 v = read_TMU_TCNTch(ch);
-+#ifdef __EMSCRIPTEN__
-+	if (ch == 0 && g_wasm_block_count >= 3217940 && g_wasm_block_count <= 3217950) {
-+		u64 t = now();
-+		EM_ASM({ console.log('[TCNT0-DIAG] blk=' + $0 +
-+			' cc=' + $1 +
-+			' sched_now_lo=' + ($2>>>0) +
-+			' now_lo=' + ($3>>>0) +
-+			' shift=' + $4 +
-+			' base_lo=' + ($5>>>0) +
-+			' tcnt=' + ($6>>>0).toString(16) +
-+			' neg=' + $7); },
-+			g_wasm_block_count,
-+			p_sh4rcb->cntx.cycle_counter,
-+			(u32)sh4_sched_now64(),
-+			(u32)t,
-+			tmu_shift[0],
-+			(u32)tmu_ch_base[0],
-+			(u32)v,
-+			v < 0 ? 1 : 0);
-+	}
-+#endif
- 	if (v < 0)
- 		return reloadCounter(ch, v);
- 	else
 diff --git a/core/hw/sh4/sh4_core_regs.cpp b/core/hw/sh4/sh4_core_regs.cpp
 index 7542f13..bfaec7d 100644
 --- a/core/hw/sh4/sh4_core_regs.cpp

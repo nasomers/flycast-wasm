@@ -711,47 +711,17 @@ static void ref_execute_block(RuntimeBlockInfo* block) {
 		u32 pc = ctx.pc;
 		if (pc < block->vaddr || pc >= block_end) break;
 		ctx.pc = pc + 2;
-		int cc_before_iread = ctx.cycle_counter;
 		u16 op = IReadMem16(pc);
-		int cc_after_iread = ctx.cycle_counter;
-#ifdef __EMSCRIPTEN__
-		// Log per-instruction cycle_counter drift for target block near divergence
-		if (block->vaddr == 0x8c00b63c &&
-			g_wasm_block_count >= 3217940 && g_wasm_block_count <= 3217950) {
-			int cc_delta_iread = cc_before_iread - cc_after_iread;
-			EM_ASM({ console.log('[REF-INSTR] blk=' + $0 +
-				' n=' + $1 +
-				' pc=0x' + ($2>>>0).toString(16) +
-				' op=0x' + ($3>>>0).toString(16) +
-				' cc_before=' + $4 +
-				' cc_after_iread=' + $5 +
-				' iread_cost=' + $6); },
-				g_wasm_block_count, n, pc, op,
-				cc_before_iread, cc_after_iread, cc_delta_iread);
-		}
-#endif
 		if (ctx.sr.FD == 1 && OpDesc[op]->IsFloatingPoint()) {
 			Do_Exception(pc, Sh4Ex_FpuDisabled);
 			return;
 		}
 		actual_iters++;
-		// Always execute instructions — OpPtr handles branches, memory, registers
-		int cc_before_op = ctx.cycle_counter;
 		OpPtr[op](&ctx, op);
-#ifdef __EMSCRIPTEN__
-		if (block->vaddr == 0x8c00b63c &&
-			g_wasm_block_count >= 3217940 && g_wasm_block_count <= 3217950) {
-			int cc_after_op = ctx.cycle_counter;
-			int cc_delta_op = cc_before_op - cc_after_op;
-			EM_ASM({ console.log('[REF-INSTR-POST] blk=' + $0 +
-				' n=' + $1 +
-				' cc_after_op=' + $2 +
-				' op_cost=' + $3 +
-				' r0=0x' + ($4>>>0).toString(16)); },
-				g_wasm_block_count, n,
-				cc_after_op, cc_delta_op, ctx.r[0]);
-		}
-#endif
+		// NOTE: EXECUTOR_MODE is not yet defined here (#define is below),
+		// so #if EXECUTOR_MODE == 0 evaluates to TRUE (undefined = 0).
+		// This charges 1 cycle per instruction in ALL modes that use
+		// ref_execute_block. The SHIL executor must match this behavior.
 #if EXECUTOR_MODE == 0
 		ctx.cycle_counter -= 1;
 #endif
@@ -806,7 +776,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 4
+#define EXECUTOR_MODE 1
 
 static u32 pc_hash = 0;
 u32 g_wasm_block_count = 0;  // global so pvr_regs.cpp can reference it
@@ -1086,46 +1056,28 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 	}
 #else
-	// SHIL executor — clean version with diagnostic logging.
+	// SHIL executor with per-instruction cycle charging.
+	// ref_execute_block (mode 4) has `ctx.cycle_counter -= 1` after each
+	// OpPtr call because `#define EXECUTOR_MODE` is defined AFTER the function,
+	// so `#if EXECUTOR_MODE == 0` evaluates to TRUE (undefined macro = 0).
+	// This per-instruction charging makes cycle_counter evolve during block
+	// execution, which is visible to lazily-computed timer registers (TCNT0 etc.)
+	// via now() = sh4_sched_now64() + SH4_TIMESLICE - cycle_counter.
+	// Without matching charges here, timer reads return values off by 1-2 ticks,
+	// cascading into the BIOS taking a different code path.
 	{
 		int cc_pre = ctx.cycle_counter;
 		ctx.cycle_counter -= block->guest_cycles;
 		g_ifb_exception_pending = false;
-#ifdef __EMSCRIPTEN__
-		if (block->vaddr == 0x8c00b63c &&
-			g_wasm_block_count >= 3217940 && g_wasm_block_count <= 3217950) {
-			EM_ASM({ console.log('[SHIL-BLOCK] blk=' + $0 +
-				' cc_pre=' + $1 +
-				' cc_charged=' + $2 +
-				' gc=' + $3); },
-				g_wasm_block_count, cc_pre,
-				ctx.cycle_counter, block->guest_cycles);
-		}
-#endif
+		int per_instr_charged = 0;
+		int max_charges = (int)block->guest_opcodes;
 		for (u32 i = 0; i < block->oplist.size(); i++) {
-#ifdef __EMSCRIPTEN__
-			if (block->vaddr == 0x8c00b63c &&
-				g_wasm_block_count >= 3217940 && g_wasm_block_count <= 3217950) {
-				EM_ASM({ console.log('[SHIL-OP-PRE] blk=' + $0 +
-					' op=' + $1 +
-					' cc=' + $2 +
-					' r0=0x' + ($3>>>0).toString(16)); },
-					g_wasm_block_count, i,
-					ctx.cycle_counter, ctx.r[0]);
-			}
-#endif
 			wasm_exec_shil_fb(block->vaddr, i);
-#ifdef __EMSCRIPTEN__
-			if (block->vaddr == 0x8c00b63c &&
-				g_wasm_block_count >= 3217940 && g_wasm_block_count <= 3217950) {
-				EM_ASM({ console.log('[SHIL-OP-POST] blk=' + $0 +
-					' op=' + $1 +
-					' cc=' + $2 +
-					' r0=0x' + ($3>>>0).toString(16)); },
-					g_wasm_block_count, i,
-					ctx.cycle_counter, ctx.r[0]);
+			// Charge 1 cycle per instruction, matching ref_execute_block
+			if (per_instr_charged < max_charges) {
+				ctx.cycle_counter -= 1;
+				per_instr_charged++;
 			}
-#endif
 		}
 		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
 		applyBlockExitCpp(block);
