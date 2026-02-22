@@ -759,7 +759,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 6
+#define EXECUTOR_MODE 4
 
 static u32 pc_hash = 0;
 static u32 block_count = 0;
