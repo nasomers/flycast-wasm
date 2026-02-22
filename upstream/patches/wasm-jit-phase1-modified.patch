@@ -973,7 +973,7 @@ index a1be200..3727ab8 100644
  
  shil_compile
 diff --git a/core/hw/sh4/dyna/ssa.cpp b/core/hw/sh4/dyna/ssa.cpp
-index 85c1fdf..a933c1a 100644
+index 85c1fdf..264e307 100644
 --- a/core/hw/sh4/dyna/ssa.cpp
 +++ b/core/hw/sh4/dyna/ssa.cpp
 @@ -262,6 +262,12 @@ bool SSAOptimizer::ExecuteConstOp(shil_opcode* op)
@@ -1000,16 +1000,6 @@ index 85c1fdf..a933c1a 100644
  				if (rs1 != (block->BlockType & 1))
  				{
  					block->BranchBlock = block->NextBlock;
-@@ -489,6 +499,9 @@ void SSAOptimizer::ConstPropPass()
- 				// and if those pages are read-only, then we can directly read the memory at compile time
- 				// and propagate the read value as a constant.
- 				if (op.op == shop_readm  && block->read_only
-+#ifdef __EMSCRIPTEN__
-+						&& false  // WASM SHIL: disable compile-time readm folding
-+#endif
- 						&& (op.rs1._imm >> 12) >= (block->vaddr >> 12)
- 						&& (op.rs1._imm >> 12) <= ((block->vaddr + block->sh4_code_size - 1) >> 12)
- 						&& op.size <= 4)
 diff --git a/core/hw/sh4/sh4_core_regs.cpp b/core/hw/sh4/sh4_core_regs.cpp
 index 7542f13..bfaec7d 100644
 --- a/core/hw/sh4/sh4_core_regs.cpp
