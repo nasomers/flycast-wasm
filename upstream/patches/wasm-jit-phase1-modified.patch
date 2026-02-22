@@ -150,7 +150,7 @@ index 878b5d5..7496f4e 100644
  	add_library(glad STATIC core/deps/glad/src/gl.c)
  	if(NOT APPLE AND NOT WIN32 AND NOT SDL2_FOUND)
 diff --git a/core/build.h b/core/build.h
-index 6ea5355..8e25ad1 100755
+index 6ea5355..07c7738 100755
 --- a/core/build.h
 +++ b/core/build.h
 @@ -17,6 +17,7 @@
@@ -168,7 +168,7 @@ index 6ea5355..8e25ad1 100755
 -#if defined(__x86_64__) || defined(_M_X64)
 +#if defined(__EMSCRIPTEN__) || defined(__wasm__)
 +	#define HOST_CPU CPU_GENERIC
-+	// WASM JIT: SH4 recompiler enabled, ARM7/DSP stay interpreter
++	// WASM JIT backend
 +	#define FEAT_SHREC DYNAREC_JIT
 +	#define FEAT_AREC DYNAREC_NONE
 +	#define FEAT_DSPREC DYNAREC_NONE
@@ -176,6 +176,24 @@ index 6ea5355..8e25ad1 100755
  	#define HOST_CPU CPU_X64
  #elif defined(__i386__) || defined(_M_IX86)
  	#define HOST_CPU CPU_X86
+@@ -48,7 +55,7 @@
+ #endif
+ 
+ #if defined(TARGET_NO_REC)
+-#define FEAT_SHREC DYNAREC_NONE
++#define FEAT_SHREC DYNAREC_JIT
+ #define FEAT_AREC DYNAREC_NONE
+ #define FEAT_DSPREC DYNAREC_NONE
+ #endif
+@@ -69,7 +76,7 @@
+ 	#if HOST_CPU == CPU_ARM || HOST_CPU == CPU_ARM64 || HOST_CPU == CPU_X86 || HOST_CPU == CPU_X64
+ 		#define FEAT_SHREC DYNAREC_JIT
+ 	#else
+-		#define FEAT_SHREC DYNAREC_NONE
++		#define FEAT_SHREC DYNAREC_JIT
+ 	#endif
+ #endif
+ 
 diff --git a/core/hw/mem/addrspace.cpp b/core/hw/mem/addrspace.cpp
 index c08cb8e..fd1756b 100644
 --- a/core/hw/mem/addrspace.cpp
@@ -213,31 +231,854 @@ index c08cb8e..fd1756b 100644
  		memset(&p_sh4rcb->cntx, 0, sizeof(p_sh4rcb->cntx));
  
 diff --git a/core/hw/naomi/naomi.cpp b/core/hw/naomi/naomi.cpp
-index abebd4e..3353a36 100644
+index abebd4e..1c4a1b0 100644
 --- a/core/hw/naomi/naomi.cpp
 +++ b/core/hw/naomi/naomi.cpp
-@@ -46,8 +46,13 @@ static X76F100SerialFlash romSerialId;
- static int dmaSchedId = -1;
- static int dmaXferDelay = 10;	// cart dma xfer speed, in cycles/byte (default 20 MB/s)
- 
+@@ -1,419 +1,425 @@
+-/*
+-	This file is part of Flycast.
+-
+-    Flycast is free software: you can redistribute it and/or modify
+-    it under the terms of the GNU General Public License as published by
+-    the Free Software Foundation, either version 2 of the License, or
+-    (at your option) any later version.
+-
+-    Flycast is distributed in the hope that it will be useful,
+-    but WITHOUT ANY WARRANTY; without even the implied warranty of
+-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-    GNU General Public License for more details.
+-
+-    You should have received a copy of the GNU General Public License
+-    along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
+- */
+-#include "types.h"
+-#include "hw/holly/sb.h"
+-#include "hw/sh4/sh4_mem.h"
+-#include "hw/holly/holly_intc.h"
+-#include "hw/sh4/sh4_sched.h"
+-#include "hw/hwreg.h"
+-
+-#include "naomi.h"
+-#include "naomi_cart.h"
+-#include "naomi_regs.h"
+-#include "naomi_m3comm.h"
+-#include "serialize.h"
+-#include "network/output.h"
+-#include "hw/sh4/modules/modules.h"
+-#include "oslib/oslib.h"
+-#include "printer.h"
+-#include "hw/flashrom/x76f100.h"
+-#include "midiffb.h"
+-#include "atomiswave.h"
+-#include "oslib/i18n.h"
+-
+-#include <algorithm>
+-
+-static NaomiM3Comm m3comm;
+-Multiboard *multiboard;
+-
+-static X76F100SerialFlash mainSerialId;
+-static X76F100SerialFlash romSerialId;
+-
+-static int dmaSchedId = -1;
+-static int dmaXferDelay = 10;	// cart dma xfer speed, in cycles/byte (default 20 MB/s)
+-
+-void NaomiBoardIDWrite(const u16 data)
+-{
+-	// bit 2: clock
+-	// bit 3: data
+-	// bit 4: reset (x76f100 only)
+-	// bit 5: chip select
+-	mainSerialId.writeCS(data & 0x20);
+-	mainSerialId.writeRST(data & 0x10);
+-	mainSerialId.writeSCL(data & 4);
+-	mainSerialId.writeSDA(data & 8);
+-}
+-
+-u16 NaomiBoardIDRead()
+-{
+-	// bit 0 indicates the eeprom is a X76F100, otherwise the BIOS expects an AT93C46
+-	// bit 3 is xf76f100 SDA
+-	// bit 4 is at93c46 DO
+-	return (mainSerialId.readSDA() << 3) | 1;
+-}
+-
+-void NaomiGameIDWrite(const u16 data)
+-{
+-	romSerialId.writeCS(data & 4);
+-	romSerialId.writeRST(data & 8);
+-	romSerialId.writeSCL(data & 2);
+-	romSerialId.writeSDA(data & 1);
+-}
+-
+-u16 NaomiGameIDRead()
+-{
+-	return romSerialId.readSDA() << 15;
+-}
+-
+-u32 ReadMem_naomi(u32 address, u32 size)
+-{
+-//	verify(size != 1);
+-	if (unlikely(CurrentCartridge == NULL))
+-	{
+-		INFO_LOG(NAOMI, "called without cartridge");
+-		return 0xFFFF;
+-	}
+-	if (address >= NAOMI_COMM2_CTRL_addr && address <= NAOMI_COMM2_STATUS1_addr)
+-		return m3comm.ReadMem(address, size);
+-	else
+-		return CurrentCartridge->ReadMem(address, size);
+-}
+-
+-void WriteMem_naomi(u32 address, u32 data, u32 size)
+-{
+-	if (unlikely(CurrentCartridge == NULL))
+-	{
+-		INFO_LOG(NAOMI, "called without cartridge");
+-		return;
+-	}
+-	if (address >= NAOMI_COMM2_CTRL_addr && address <= NAOMI_COMM2_STATUS1_addr
+-			&& settings.platform.isNaomi())
+-		m3comm.WriteMem(address, data, size);
+-	else
+-		CurrentCartridge->WriteMem(address, data, size);
+-}
+-
+-static int naomiDmaSched(int tag, int sch_cycl, int jitter, void *arg)
+-{
+-	u32 start = SB_GDSTARD;
+-	u32 len = std::min<int>(((SB_GDLEN + 31) & ~31) - SB_GDLEND, 1024);
+-	SB_GDLEND += len;
+-	while (len > 0)
+-	{
+-		u32 block_len = len;
+-		void* ptr = CurrentCartridge->GetDmaPtr(block_len);
+-		if (block_len == 0)
+-		{
+-			INFO_LOG(NAOMI, "Aborted DMA transfer. Read past end of cart?");
+-			for (u32 i = 0; i < len; i += 8, start += 8)
+-				addrspace::write64(start, 0);
+-			break;
+-		}
+-		WriteMemBlock_nommu_ptr(start, (u32*)ptr, block_len);
+-		CurrentCartridge->AdvancePtr(block_len);
+-		len -= block_len;
+-		start += block_len;
+-	}
+-	SB_GDSTARD = start;
+-	if (SB_GDLEN <= SB_GDLEND)
+-	{
+-		SB_GDST = 0;
+-		asic_RaiseInterrupt(holly_GDROM_DMA);
+-		return 0;
+-	}
+-	else {
+-		return std::min<int>(SB_GDLEN - SB_GDLEND, 1024) * dmaXferDelay;
+-	}
+-}
+-
+-//Dma Start
+-static void Naomi_DmaStart(u32 addr, u32 data)
+-{
+-	if ((data & 1) == 0 || SB_GDST == 1)
+-		return;
+-	if (SB_GDEN == 0)
+-	{
+-		INFO_LOG(NAOMI, "Invalid NAOMI-DMA start, SB_GDEN=0. Ignoring it.");
+-		return;
+-	}
+-	
+-	if (multiboard != nullptr && multiboard->dmaStart())
+-	{
+-	}
+-	else if (!m3comm.DmaStart(addr, data) && CurrentCartridge != nullptr)
+-	{
+-		DEBUG_LOG(NAOMI, "NAOMI-DMA start addr %08X len %x", SB_GDSTAR, SB_GDLEN);
+-		verify(1 == SB_GDDIR);
+-		SB_GDST = 1;
+-		SB_GDSTARD = SB_GDSTAR & 0x1FFFFFE0;
+-		SB_GDLEND = 0;
+-		// Max G1 bus rate: 50 MHz x 16 bits
+-		// SH4_access990312_e.xls: 14.4 MB/s from GD-ROM to system RAM
+-		// Here: 20 MB/s
+-		sh4_sched_request(dmaSchedId, std::min<int>(SB_GDLEN, 1024) * dmaXferDelay);
+-		return;
+-	}
+-	else
+-	{
+-		SB_GDSTARD = SB_GDSTAR + SB_GDLEN;
+-		SB_GDLEND = SB_GDLEN;
+-	}
+-	asic_RaiseInterrupt(holly_GDROM_DMA);
+-}
+-
+-void Naomi_setDmaDelay()
+-{
+-	if (settings.platform.isAtomiswave() || settings.content.gameId == "FORCE FIVE"
+-			|| settings.content.gameId == "KENJU")
+-		// 7 MB/s for Atomiwave games and conversions
+-		dmaXferDelay = 27;
+-	else
+-		dmaXferDelay = 10;
+-}
+-
+-static void Naomi_DmaEnable(u32 addr, u32 data)
+-{
+-	SB_GDEN = data & 1;
+-	if (SB_GDEN == 0 && SB_GDST == 1)
+-	{
+-		INFO_LOG(NAOMI, "NAOMI-DMA aborted");
+-		SB_GDST = 0;
+-		sh4_sched_request(dmaSchedId, -1);
+-	}
+-}
+-
+-void naomi_reg_Init()
+-{
+-	static const u8 romSerialData[0x84] = {
+-		0x19, 0x00, 0xaa, 0x55,
+-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-		0x69, 0x79, 0x68, 0x6b, 0x74, 0x6d, 0x68, 0x6d,
+-		0xa1, 0x09, ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
+-		' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',  ' ', ' ', ' ', ' ',
+-		'0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0'
+-	};
+-	romSerialId.setData(romSerialData);
+-	mainSerialId.setData(romSerialData);
+-	if (dmaSchedId == -1)
+-		dmaSchedId = sh4_sched_register(0, naomiDmaSched);
+-}
+-
+-// Sets the full content of the rom board serial eeprom (132 bytes)
+-// including response to reset and read/write passwords.
+-void setGameSerialId(const u8 *data)
+-{
+-	romSerialId.setData(data);
+-}
+-
+-// Return the protected data from the rom board serial eeprom (112 bytes)
+-// excluding response to reset and passwords.
+-const u8 *getGameSerialId()
+-{
+-	return romSerialId.getProtectedData();
+-}
+-
+-void naomi_reg_Term()
+-{
+-	if (multiboard != nullptr)
+-		delete multiboard;
+-	multiboard = nullptr;
+-	m3comm.closeNetwork();
+-	networkOutput.term();
+-	if (dmaSchedId != -1)
+-		sh4_sched_unregister(dmaSchedId);
+-	dmaSchedId = -1;
+-	midiffb::term();
+-}
+-
+-void naomi_reg_Reset(bool hard)
+-{
+-	hollyRegs.setWriteHandler<SB_GDST_addr>(Naomi_DmaStart);
+-	hollyRegs.setWriteHandler<SB_GDEN_addr>(Naomi_DmaEnable);
+-	SB_GDST = 0;
+-	SB_GDEN = 0;
+-	sh4_sched_request(dmaSchedId, -1);
+-
+-	atomiswave::reset();
+-
+-	m3comm.closeNetwork();
+-	if (hard)
+-	{
+-		naomi_cart_Close();
+-		if (multiboard != nullptr)
+-		{
+-			delete multiboard;
+-			multiboard = nullptr;
+-		}
+-		if (settings.naomi.multiboard)
+-			multiboard = new Multiboard();
+-		networkOutput.reset();
+-		mainSerialId.reset();
+-		romSerialId.reset();
+-	}
+-	else if (multiboard != nullptr)
+-		multiboard->reset();
+-	midiffb::reset();
+-}
+-
+-void naomi_Serialize(Serializer& ser)
+-{
+-	mainSerialId.serialize(ser);
+-	romSerialId.serialize(ser);
+-	atomiswave::serialize(ser);
+-	// TODO serialize m3comm?
+-	midiffb::serialize(ser);
+-	sh4_sched_serialize(ser, dmaSchedId);
+-}
+-void naomi_Deserialize(Deserializer& deser)
+-{
+-	if (deser.version() < Deserializer::V40)
+-	{
+-		deser.skip<u32>();	// GSerialBuffer
+-		deser.skip<u32>();	// BSerialBuffer
+-		deser.skip<int>();	// GBufPos
+-		deser.skip<int>();	// BBufPos
+-		deser.skip<int>();	// GState
+-		deser.skip<int>();	// BState
+-		deser.skip<int>();	// GOldClk
+-		deser.skip<int>();	// BOldClk
+-		deser.skip<int>();	// BControl
+-		deser.skip<int>();	// BCmd
+-		deser.skip<int>();	// BLastCmd
+-		deser.skip<int>();	// GControl
+-		deser.skip<int>();	// GCmd
+-		deser.skip<int>();	// GLastCmd
+-		deser.skip<int>();	// SerStep
+-		deser.skip<int>();	// SerStep2
+-		deser.skip(69);		// BSerial
+-		deser.skip(69);		// GSerial
+-	}
+-	else
+-	{
+-		mainSerialId.deserialize(deser);
+-		romSerialId.deserialize(deser);
+-	}
+-	if (deser.version() < Deserializer::V36)
+-	{
+-		deser.skip<u32>(); // reg_dimm_command;
+-		deser.skip<u32>(); // reg_dimm_offsetl;
+-		deser.skip<u32>(); // reg_dimm_parameterl;
+-		deser.skip<u32>(); // reg_dimm_parameterh;
+-		deser.skip<u32>(); // reg_dimm_status;
+-	}
+-	atomiswave::deserialize(deser);
+-	midiffb::deserialize(deser);
+-	if (deser.version() >= Deserializer::V45)
+-		sh4_sched_deserialize(deser, dmaSchedId);
+-}
+-
+-struct DriveSimPipe : public SerialPort::Pipe
+-{
+-	void write(u8 data) override
+-	{
+-		if (buffer.empty() && data != 2)
+-			return;
+-		if (buffer.size() == 7)
+-		{
+-			u8 checksum = 0;
+-			for (u8 b : buffer)
+-				checksum += b;
+-			if (checksum == data)
+-			{
+-				int newTacho = (buffer[2] - 1) * 100;
+-				if (newTacho != tacho)
+-				{
+-					tacho = newTacho;
+-					networkOutput.output("tachometer", tacho);
+-				}
+-				int newSpeed = buffer[3] - 1;
+-				if (newSpeed != speed)
+-				{
+-					speed = newSpeed;
+-					networkOutput.output("speedometer", speed);
+-				}
+-				if (!config::NetworkOutput)
+-				{
+-					std::string message = strprintf(i18n::T("Speed: %3d"), speed);
+-					os_notify(message.c_str(), 1000);
+-				}
+-			}
+-			buffer.clear();
+-		}
+-		else
+-		{
+-			buffer.push_back(data);
+-		}
+-	}
+-
+-	void reset()
+-	{
+-		buffer.clear();
+-		tacho = -1;
+-		speed = -1;
+-	}
+-private:
+-	std::vector<u8> buffer;
+-	int tacho = -1;
+-	int speed = -1;
+-};
+-
+-void initDriveSimSerialPipe()
+-{
+-	static DriveSimPipe pipe;
+-
+-	pipe.reset();
+-	SCIFSerialPort::Instance().setPipe(&pipe);
+-}
+-
+-G2PrinterConnection g2PrinterConnection;
+-
+-u32 G2PrinterConnection::read(u32 addr, u32 size)
+-{
+-	if (addr == STATUS_REG_ADDR)
+-	{
+-		u32 ret = printerStat;
+-		printerStat |= 1;
+-		DEBUG_LOG(NAOMI, "Printer status == %x", ret);
+-		return ret;
+-	}
+-	else
+-	{
+-		INFO_LOG(NAOMI, "Unhandled G2 Ext read<%d> at %x", size, addr);
+-		return 0;
+-	}
+-}
+-
+-void G2PrinterConnection::write(u32 addr, u32 size, u32 data)
+-{
+-	switch (addr)
+-	{
+-	case DATA_REG_ADDR:
+-		for (u32 i = 0; i < size; i++)
+-			printer::print((char)(data >> (i * 8)));
+-		break;
+-
+-	case STATUS_REG_ADDR:
+-		DEBUG_LOG(NAOMI, "Printer status = %x", data);
+-		printerStat &= ~1;
+-		break;
+-
+-	default:
+-		INFO_LOG(NAOMI, "Unhandled G2 Ext write<%d> at %x: %x", size, addr, data);
+-		break;
+-	}
+-}
+-
++/*
++	This file is part of Flycast.
++
++    Flycast is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 2 of the License, or
++    (at your option) any later version.
++
++    Flycast is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
++ */
++#include "types.h"
++#include "hw/holly/sb.h"
++#include "hw/sh4/sh4_mem.h"
++#include "hw/holly/holly_intc.h"
++#include "hw/sh4/sh4_sched.h"
++#include "hw/hwreg.h"
++
++#include "naomi.h"
++#include "naomi_cart.h"
++#include "naomi_regs.h"
++#include "naomi_m3comm.h"
++#include "serialize.h"
++#include "network/output.h"
++#include "hw/sh4/modules/modules.h"
++#include "oslib/oslib.h"
++#include "printer.h"
++#include "hw/flashrom/x76f100.h"
++#include "midiffb.h"
++#include "atomiswave.h"
++#include "oslib/i18n.h"
++
++#include <algorithm>
++
++static NaomiM3Comm m3comm;
++Multiboard *multiboard;
++
++static X76F100SerialFlash mainSerialId;
++static X76F100SerialFlash romSerialId;
++
++static int dmaSchedId = -1;
++static int dmaXferDelay = 10;	// cart dma xfer speed, in cycles/byte (default 20 MB/s)
++
 +// Diagnostic counters for serial EEPROM access tracking
 +u32 g_naomi_board_write_count = 0;
 +u32 g_naomi_board_read_count = 0;
 +
- void NaomiBoardIDWrite(const u16 data)
- {
++void NaomiBoardIDWrite(const u16 data)
++{
 +	g_naomi_board_write_count++;
- 	// bit 2: clock
- 	// bit 3: data
- 	// bit 4: reset (x76f100 only)
-@@ -60,6 +65,7 @@ void NaomiBoardIDWrite(const u16 data)
- 
- u16 NaomiBoardIDRead()
- {
++	// bit 2: clock
++	// bit 3: data
++	// bit 4: reset (x76f100 only)
++	// bit 5: chip select
++	mainSerialId.writeCS(data & 0x20);
++	mainSerialId.writeRST(data & 0x10);
++	mainSerialId.writeSCL(data & 4);
++	mainSerialId.writeSDA(data & 8);
++}
++
++u16 NaomiBoardIDRead()
++{
 +	g_naomi_board_read_count++;
- 	// bit 0 indicates the eeprom is a X76F100, otherwise the BIOS expects an AT93C46
- 	// bit 3 is xf76f100 SDA
- 	// bit 4 is at93c46 DO
++	// bit 0 indicates the eeprom is a X76F100, otherwise the BIOS expects an AT93C46
++	// bit 3 is xf76f100 SDA
++	// bit 4 is at93c46 DO
++	return (mainSerialId.readSDA() << 3) | 1;
++}
++
++void NaomiGameIDWrite(const u16 data)
++{
++	romSerialId.writeCS(data & 4);
++	romSerialId.writeRST(data & 8);
++	romSerialId.writeSCL(data & 2);
++	romSerialId.writeSDA(data & 1);
++}
++
++u16 NaomiGameIDRead()
++{
++	return romSerialId.readSDA() << 15;
++}
++
++u32 ReadMem_naomi(u32 address, u32 size)
++{
++//	verify(size != 1);
++	if (unlikely(CurrentCartridge == NULL))
++	{
++		INFO_LOG(NAOMI, "called without cartridge");
++		return 0xFFFF;
++	}
++	if (address >= NAOMI_COMM2_CTRL_addr && address <= NAOMI_COMM2_STATUS1_addr)
++		return m3comm.ReadMem(address, size);
++	else
++		return CurrentCartridge->ReadMem(address, size);
++}
++
++void WriteMem_naomi(u32 address, u32 data, u32 size)
++{
++	if (unlikely(CurrentCartridge == NULL))
++	{
++		INFO_LOG(NAOMI, "called without cartridge");
++		return;
++	}
++	if (address >= NAOMI_COMM2_CTRL_addr && address <= NAOMI_COMM2_STATUS1_addr
++			&& settings.platform.isNaomi())
++		m3comm.WriteMem(address, data, size);
++	else
++		CurrentCartridge->WriteMem(address, data, size);
++}
++
++static int naomiDmaSched(int tag, int sch_cycl, int jitter, void *arg)
++{
++	u32 start = SB_GDSTARD;
++	u32 len = std::min<int>(((SB_GDLEN + 31) & ~31) - SB_GDLEND, 1024);
++	SB_GDLEND += len;
++	while (len > 0)
++	{
++		u32 block_len = len;
++		void* ptr = CurrentCartridge->GetDmaPtr(block_len);
++		if (block_len == 0)
++		{
++			INFO_LOG(NAOMI, "Aborted DMA transfer. Read past end of cart?");
++			for (u32 i = 0; i < len; i += 8, start += 8)
++				addrspace::write64(start, 0);
++			break;
++		}
++		WriteMemBlock_nommu_ptr(start, (u32*)ptr, block_len);
++		CurrentCartridge->AdvancePtr(block_len);
++		len -= block_len;
++		start += block_len;
++	}
++	SB_GDSTARD = start;
++	if (SB_GDLEN <= SB_GDLEND)
++	{
++		SB_GDST = 0;
++		asic_RaiseInterrupt(holly_GDROM_DMA);
++		return 0;
++	}
++	else {
++		return std::min<int>(SB_GDLEN - SB_GDLEND, 1024) * dmaXferDelay;
++	}
++}
++
++//Dma Start
++static void Naomi_DmaStart(u32 addr, u32 data)
++{
++	if ((data & 1) == 0 || SB_GDST == 1)
++		return;
++	if (SB_GDEN == 0)
++	{
++		INFO_LOG(NAOMI, "Invalid NAOMI-DMA start, SB_GDEN=0. Ignoring it.");
++		return;
++	}
++	
++	if (multiboard != nullptr && multiboard->dmaStart())
++	{
++	}
++	else if (!m3comm.DmaStart(addr, data) && CurrentCartridge != nullptr)
++	{
++		DEBUG_LOG(NAOMI, "NAOMI-DMA start addr %08X len %x", SB_GDSTAR, SB_GDLEN);
++		verify(1 == SB_GDDIR);
++		SB_GDST = 1;
++		SB_GDSTARD = SB_GDSTAR & 0x1FFFFFE0;
++		SB_GDLEND = 0;
++		// Max G1 bus rate: 50 MHz x 16 bits
++		// SH4_access990312_e.xls: 14.4 MB/s from GD-ROM to system RAM
++		// Here: 20 MB/s
++		sh4_sched_request(dmaSchedId, std::min<int>(SB_GDLEN, 1024) * dmaXferDelay);
++		return;
++	}
++	else
++	{
++		SB_GDSTARD = SB_GDSTAR + SB_GDLEN;
++		SB_GDLEND = SB_GDLEN;
++	}
++	asic_RaiseInterrupt(holly_GDROM_DMA);
++}
++
++void Naomi_setDmaDelay()
++{
++	if (settings.platform.isAtomiswave() || settings.content.gameId == "FORCE FIVE"
++			|| settings.content.gameId == "KENJU")
++		// 7 MB/s for Atomiwave games and conversions
++		dmaXferDelay = 27;
++	else
++		dmaXferDelay = 10;
++}
++
++static void Naomi_DmaEnable(u32 addr, u32 data)
++{
++	SB_GDEN = data & 1;
++	if (SB_GDEN == 0 && SB_GDST == 1)
++	{
++		INFO_LOG(NAOMI, "NAOMI-DMA aborted");
++		SB_GDST = 0;
++		sh4_sched_request(dmaSchedId, -1);
++	}
++}
++
++void naomi_reg_Init()
++{
++	static const u8 romSerialData[0x84] = {
++		0x19, 0x00, 0xaa, 0x55,
++		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		0x69, 0x79, 0x68, 0x6b, 0x74, 0x6d, 0x68, 0x6d,
++		0xa1, 0x09, ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
++		' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',  ' ', ' ', ' ', ' ',
++		'0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0'
++	};
++	romSerialId.setData(romSerialData);
++	mainSerialId.setData(romSerialData);
++	if (dmaSchedId == -1)
++		dmaSchedId = sh4_sched_register(0, naomiDmaSched);
++}
++
++// Sets the full content of the rom board serial eeprom (132 bytes)
++// including response to reset and read/write passwords.
++void setGameSerialId(const u8 *data)
++{
++	romSerialId.setData(data);
++}
++
++// Return the protected data from the rom board serial eeprom (112 bytes)
++// excluding response to reset and passwords.
++const u8 *getGameSerialId()
++{
++	return romSerialId.getProtectedData();
++}
++
++void naomi_reg_Term()
++{
++	if (multiboard != nullptr)
++		delete multiboard;
++	multiboard = nullptr;
++	m3comm.closeNetwork();
++	networkOutput.term();
++	if (dmaSchedId != -1)
++		sh4_sched_unregister(dmaSchedId);
++	dmaSchedId = -1;
++	midiffb::term();
++}
++
++void naomi_reg_Reset(bool hard)
++{
++	hollyRegs.setWriteHandler<SB_GDST_addr>(Naomi_DmaStart);
++	hollyRegs.setWriteHandler<SB_GDEN_addr>(Naomi_DmaEnable);
++	SB_GDST = 0;
++	SB_GDEN = 0;
++	sh4_sched_request(dmaSchedId, -1);
++
++	atomiswave::reset();
++
++	m3comm.closeNetwork();
++	if (hard)
++	{
++		naomi_cart_Close();
++		if (multiboard != nullptr)
++		{
++			delete multiboard;
++			multiboard = nullptr;
++		}
++		if (settings.naomi.multiboard)
++			multiboard = new Multiboard();
++		networkOutput.reset();
++		mainSerialId.reset();
++		romSerialId.reset();
++	}
++	else if (multiboard != nullptr)
++		multiboard->reset();
++	midiffb::reset();
++}
++
++void naomi_Serialize(Serializer& ser)
++{
++	mainSerialId.serialize(ser);
++	romSerialId.serialize(ser);
++	atomiswave::serialize(ser);
++	// TODO serialize m3comm?
++	midiffb::serialize(ser);
++	sh4_sched_serialize(ser, dmaSchedId);
++}
++void naomi_Deserialize(Deserializer& deser)
++{
++	if (deser.version() < Deserializer::V40)
++	{
++		deser.skip<u32>();	// GSerialBuffer
++		deser.skip<u32>();	// BSerialBuffer
++		deser.skip<int>();	// GBufPos
++		deser.skip<int>();	// BBufPos
++		deser.skip<int>();	// GState
++		deser.skip<int>();	// BState
++		deser.skip<int>();	// GOldClk
++		deser.skip<int>();	// BOldClk
++		deser.skip<int>();	// BControl
++		deser.skip<int>();	// BCmd
++		deser.skip<int>();	// BLastCmd
++		deser.skip<int>();	// GControl
++		deser.skip<int>();	// GCmd
++		deser.skip<int>();	// GLastCmd
++		deser.skip<int>();	// SerStep
++		deser.skip<int>();	// SerStep2
++		deser.skip(69);		// BSerial
++		deser.skip(69);		// GSerial
++	}
++	else
++	{
++		mainSerialId.deserialize(deser);
++		romSerialId.deserialize(deser);
++	}
++	if (deser.version() < Deserializer::V36)
++	{
++		deser.skip<u32>(); // reg_dimm_command;
++		deser.skip<u32>(); // reg_dimm_offsetl;
++		deser.skip<u32>(); // reg_dimm_parameterl;
++		deser.skip<u32>(); // reg_dimm_parameterh;
++		deser.skip<u32>(); // reg_dimm_status;
++	}
++	atomiswave::deserialize(deser);
++	midiffb::deserialize(deser);
++	if (deser.version() >= Deserializer::V45)
++		sh4_sched_deserialize(deser, dmaSchedId);
++}
++
++struct DriveSimPipe : public SerialPort::Pipe
++{
++	void write(u8 data) override
++	{
++		if (buffer.empty() && data != 2)
++			return;
++		if (buffer.size() == 7)
++		{
++			u8 checksum = 0;
++			for (u8 b : buffer)
++				checksum += b;
++			if (checksum == data)
++			{
++				int newTacho = (buffer[2] - 1) * 100;
++				if (newTacho != tacho)
++				{
++					tacho = newTacho;
++					networkOutput.output("tachometer", tacho);
++				}
++				int newSpeed = buffer[3] - 1;
++				if (newSpeed != speed)
++				{
++					speed = newSpeed;
++					networkOutput.output("speedometer", speed);
++				}
++				if (!config::NetworkOutput)
++				{
++					std::string message = strprintf(i18n::T("Speed: %3d"), speed);
++					os_notify(message.c_str(), 1000);
++				}
++			}
++			buffer.clear();
++		}
++		else
++		{
++			buffer.push_back(data);
++		}
++	}
++
++	void reset()
++	{
++		buffer.clear();
++		tacho = -1;
++		speed = -1;
++	}
++private:
++	std::vector<u8> buffer;
++	int tacho = -1;
++	int speed = -1;
++};
++
++void initDriveSimSerialPipe()
++{
++	static DriveSimPipe pipe;
++
++	pipe.reset();
++	SCIFSerialPort::Instance().setPipe(&pipe);
++}
++
++G2PrinterConnection g2PrinterConnection;
++
++u32 G2PrinterConnection::read(u32 addr, u32 size)
++{
++	if (addr == STATUS_REG_ADDR)
++	{
++		u32 ret = printerStat;
++		printerStat |= 1;
++		DEBUG_LOG(NAOMI, "Printer status == %x", ret);
++		return ret;
++	}
++	else
++	{
++		INFO_LOG(NAOMI, "Unhandled G2 Ext read<%d> at %x", size, addr);
++		return 0;
++	}
++}
++
++void G2PrinterConnection::write(u32 addr, u32 size, u32 data)
++{
++	switch (addr)
++	{
++	case DATA_REG_ADDR:
++		for (u32 i = 0; i < size; i++)
++			printer::print((char)(data >> (i * 8)));
++		break;
++
++	case STATUS_REG_ADDR:
++		DEBUG_LOG(NAOMI, "Printer status = %x", data);
++		printerStat &= ~1;
++		break;
++
++	default:
++		INFO_LOG(NAOMI, "Unhandled G2 Ext write<%d> at %x: %x", size, addr, data);
++		break;
++	}
++}
++
 diff --git a/core/hw/pvr/Renderer_if.cpp b/core/hw/pvr/Renderer_if.cpp
 index 4fbb9a5..be30d56 100644
 --- a/core/hw/pvr/Renderer_if.cpp
@@ -295,25 +1136,400 @@ index 4fbb9a5..be30d56 100644
  			|| (!render_called && fb_dirty && FB_R_CTRL.fb_enable))
  	{
 diff --git a/core/hw/pvr/pvr_regs.cpp b/core/hw/pvr/pvr_regs.cpp
-index 0538b3c..a35fb9a 100644
+index 0538b3c..7379db7 100644
 --- a/core/hw/pvr/pvr_regs.cpp
 +++ b/core/hw/pvr/pvr_regs.cpp
-@@ -4,6 +4,11 @@
- #include "ta.h"
- #include "spg.h"
- #include <map>
+@@ -1,254 +1,284 @@
+-#include "pvr_regs.h"
+-#include "pvr_mem.h"
+-#include "Renderer_if.h"
+-#include "ta.h"
+-#include "spg.h"
+-#include <map>
+-
+-bool pal_needs_update=true;
+-
+-u8 pvr_regs[pvr_RegSize];
+-
+-#define PVR_REG_NAME(r) { r##_addr, #r },
+-const std::map<u32, const char *> pvr_reg_names = {
+-		PVR_REG_NAME(ID)
+-		PVR_REG_NAME(REVISION)
+-		PVR_REG_NAME(SOFTRESET)
+-		PVR_REG_NAME(STARTRENDER)
+-		PVR_REG_NAME(TEST_SELECT)
+-		PVR_REG_NAME(PARAM_BASE)
+-		PVR_REG_NAME(REGION_BASE)
+-		PVR_REG_NAME(SPAN_SORT_CFG)
+-		PVR_REG_NAME(VO_BORDER_COL)
+-		PVR_REG_NAME(FB_R_CTRL)
+-		PVR_REG_NAME(FB_W_CTRL)
+-		PVR_REG_NAME(FB_W_LINESTRIDE)
+-		PVR_REG_NAME(FB_R_SOF1)
+-		PVR_REG_NAME(FB_R_SOF2)
+-		PVR_REG_NAME(FB_R_SIZE)
+-		PVR_REG_NAME(FB_W_SOF1)
+-		PVR_REG_NAME(FB_W_SOF2)
+-		PVR_REG_NAME(FB_X_CLIP)
+-		PVR_REG_NAME(FB_Y_CLIP)
+-		PVR_REG_NAME(FPU_SHAD_SCALE)
+-		PVR_REG_NAME(FPU_CULL_VAL)
+-		PVR_REG_NAME(FPU_PARAM_CFG)
+-		PVR_REG_NAME(HALF_OFFSET)
+-		PVR_REG_NAME(FPU_PERP_VAL)
+-		PVR_REG_NAME(ISP_BACKGND_D)
+-		PVR_REG_NAME(ISP_BACKGND_T)
+-		PVR_REG_NAME(ISP_FEED_CFG)
+-		PVR_REG_NAME(SDRAM_REFRESH)
+-		PVR_REG_NAME(SDRAM_ARB_CFG)
+-		PVR_REG_NAME(SDRAM_CFG)
+-		PVR_REG_NAME(FOG_COL_RAM)
+-		PVR_REG_NAME(FOG_COL_VERT)
+-		PVR_REG_NAME(FOG_DENSITY)
+-		PVR_REG_NAME(FOG_CLAMP_MAX)
+-		PVR_REG_NAME(FOG_CLAMP_MIN)
+-		PVR_REG_NAME(SPG_TRIGGER_POS)
+-		PVR_REG_NAME(SPG_HBLANK_INT)
+-		PVR_REG_NAME(SPG_VBLANK_INT)
+-		PVR_REG_NAME(SPG_CONTROL)
+-		PVR_REG_NAME(SPG_HBLANK)
+-		PVR_REG_NAME(SPG_LOAD)
+-		PVR_REG_NAME(SPG_VBLANK)
+-		PVR_REG_NAME(SPG_WIDTH)
+-		PVR_REG_NAME(TEXT_CONTROL)
+-		PVR_REG_NAME(VO_CONTROL)
+-		PVR_REG_NAME(VO_STARTX)
+-		PVR_REG_NAME(VO_STARTY)
+-		PVR_REG_NAME(SCALER_CTL)
+-		PVR_REG_NAME(PAL_RAM_CTRL)
+-		PVR_REG_NAME(SPG_STATUS)
+-		PVR_REG_NAME(FB_BURSTCTRL)
+-		PVR_REG_NAME(FB_C_SOF)
+-		PVR_REG_NAME(Y_COEFF)
+-		PVR_REG_NAME(PT_ALPHA_REF)
+-		PVR_REG_NAME(TA_OL_BASE)
+-		PVR_REG_NAME(TA_ISP_BASE)
+-		PVR_REG_NAME(TA_OL_LIMIT)
+-		PVR_REG_NAME(TA_ISP_LIMIT)
+-		PVR_REG_NAME(TA_NEXT_OPB)
+-		PVR_REG_NAME(TA_ITP_CURRENT)
+-		PVR_REG_NAME(TA_GLOB_TILE_CLIP)
+-		PVR_REG_NAME(TA_ALLOC_CTRL)
+-		PVR_REG_NAME(TA_LIST_INIT)
+-		PVR_REG_NAME(TA_YUV_TEX_BASE)
+-		PVR_REG_NAME(TA_YUV_TEX_CTRL)
+-		PVR_REG_NAME(TA_YUV_TEX_CNT)
+-		PVR_REG_NAME(TA_LIST_CONT)
+-		PVR_REG_NAME(TA_NEXT_OPB_INIT)
+-		PVR_REG_NAME(SIGNATURE1)
+-		PVR_REG_NAME(SIGNATURE2)
+-};
+-#undef PVR_REG_NAME
+-
+-static const char *regName(u32 paddr)
+-{
+-	u32 addr = paddr & pvr_RegMask;
+-	static char regName[32];
+-	auto it = pvr_reg_names.find(addr);
+-	if (it == pvr_reg_names.end())
+-	{
+-		if (addr >= FOG_TABLE_START_addr && addr <= FOG_TABLE_END_addr)
+-			snprintf(regName, sizeof(regName), "FOG_TABLE[%x]", addr - FOG_TABLE_START_addr);
+-		else if (addr >= TA_OL_POINTERS_START_addr && addr <= TA_OL_POINTERS_END_addr)
+-			snprintf(regName, sizeof(regName), "TA_OL_POINTERS[%x]", addr - TA_OL_POINTERS_START_addr);
+-		else if (addr >= PALETTE_RAM_START_addr && addr <= PALETTE_RAM_END_addr)
+-			snprintf(regName, sizeof(regName), "PALETTE[%x]", addr - PALETTE_RAM_START_addr);
+-		else
+-			snprintf(regName, sizeof(regName), "?%08x", paddr);
+-		return regName;
+-	}
+-	else
+-		return it->second;
+-}
+-
+-u32 pvr_ReadReg(u32 addr)
+-{
+-	if ((addr & pvr_RegMask) != SPG_STATUS_addr)
+-		DEBUG_LOG(PVR, "read %s.%c == %x", regName(addr),
+-				((addr >> 26) & 7) == 2 ? 'b' : (addr & 0x2000000) ? '1' : '0',
+-						PvrReg(addr, u32));
+-	return PvrReg(addr,u32);
+-}
+-
+-void pvr_WriteReg(u32 paddr,u32 data)
+-{
+-	u32 addr = paddr & pvr_RegMask;
+-	DEBUG_LOG(PVR, "write %s.%c = %x", regName(paddr),
+-			((paddr >> 26) & 7) == 2 ? 'b' : (paddr & 0x2000000) ? '1' : '0',
+-					data);
+-
+-	switch (addr)
+-	{
+-	case ID_addr:
+-	case REVISION_addr:
+-	case TA_YUV_TEX_CNT_addr:
+-		return; // read only
+-
+-	case STARTRENDER_addr:
+-		rend_start_render();
+-		YUV_init();
+-		return;
+-
+-	case TA_LIST_INIT_addr:
+-		if (data >> 31)
+-		{
+-			ta_vtx_ListInit(false);
+-			TA_NEXT_OPB = TA_NEXT_OPB_INIT;
+-			TA_ITP_CURRENT = TA_ISP_BASE;
+-		}
+-		return;
+-
+-	case SOFTRESET_addr:
+-		if (data & 1)
+-			ta_vtx_SoftReset();
+-		return;
+-
+-	case TA_LIST_CONT_addr:
+-		//a write of anything works ?
+-		ta_vtx_ListInit(true);
+-		break;
+-	
+-	case SPG_CONTROL_addr:
+-	case SPG_LOAD_addr:
+-		if (PvrReg(addr, u32) != data)
+-		{
+-			PvrReg(addr, u32) = data;
+-			CalculateSync();
+-		}
+-		return;
+-
+-	case FB_R_CTRL_addr:
+-		{
+-			bool vclk_div_changed = (PvrReg(addr, u32) ^ data) & (1 << 23);
+-			PvrReg(addr, u32) = data;
+-			if (vclk_div_changed)
+-				CalculateSync();
+-		}
+-		return;
+-
+-	case FB_R_SIZE_addr:
+-		if (PvrReg(addr, u32) != data)
+-		{
+-			PvrReg(addr, u32) = data;
+-			fb_dirty = false;
+-			check_framebuffer_write();
+-		}
+-		return;
+-
+-	case TA_YUV_TEX_BASE_addr:
+-		PvrReg(addr, u32) = data & 0x00FFFFF8;
+-		YUV_init();
+-		return;
+-
+-	case TA_YUV_TEX_CTRL_addr:
+-		PvrReg(addr, u32) = data;
+-		YUV_init();
+-		return;
+-
+-	case FB_R_SOF1_addr:
+-	case FB_R_SOF2_addr:
+-		data &= 0x00fffffc;
+-		rend_swap_frame(data);
+-		break;
+-
+-	case FB_W_SOF1_addr:
+-		data &= 0x01fffffc;
+-		rend_set_fb_write_addr(data);
+-		break;
+-
+-	case FB_W_SOF2_addr:
+-		data &= 0x01fffffc;
+-		break;
+-
+-	case SPG_HBLANK_INT_addr:
+-		data &= 0x03FF33FF;
+-		if (data != SPG_HBLANK_INT.full) {
+-			SPG_HBLANK_INT.full = data;
+-			rescheduleSPG();
+-		}
+-		return;
+-
+-	case PAL_RAM_CTRL_addr:
+-		pal_needs_update = pal_needs_update || ((data ^ PAL_RAM_CTRL) & 3) != 0;
+-		break;
+-
+-	default:
+-		if (addr >= PALETTE_RAM_START_addr && PvrReg(addr,u32) != data)
+-			pal_needs_update = true;
+-		else if (addr >= FOG_TABLE_START_addr && addr <= FOG_TABLE_END_addr && PvrReg(addr,u32) != data)
+-			rend_updateFogTable();
+-		break;
+-	}
+-	PvrReg(addr, u32) = data;
+-}
+-
+-void Regs_Reset(bool hard)
+-{
+-	if (hard)
+-		memset(&pvr_regs[0], 0, sizeof(pvr_regs));
+-	ID_Reg              = 0x17FD11DB;
+-	REVISION            = 0x00000011;
+-	SOFTRESET           = 0x00000007;
+-	SPG_HBLANK_INT.full = 0x031D0000;
+-	SPG_VBLANK_INT.full = 0x00150104;
+-	FPU_PARAM_CFG       = 0x0007DF77;
+-	HALF_OFFSET         = 0x00000007;
+-	ISP_FEED_CFG        = 0x00402000;
+-	SDRAM_REFRESH       = 0x00000020;
+-	SDRAM_ARB_CFG       = 0x0000001F;
+-	SDRAM_CFG           = 0x15F28997;
+-	SPG_HBLANK.full     = 0x007E0345;
+-	SPG_LOAD.full       = 0x01060359;
+-	SPG_VBLANK.full     = 0x01500104;
+-	SPG_WIDTH.full      = 0x07F1933F;
+-	VO_CONTROL.full     = 0x00000108;
+-	VO_STARTX.full      = 0x0000009D;
+-	VO_STARTY.full      = 0x00150015;
+-	SCALER_CTL.full     = 0x00000400;
+-	FB_BURSTCTRL        = 0x00090639;
+-	PT_ALPHA_REF        = 0x000000FF;
+-}
++#include "pvr_regs.h"
++#include "pvr_mem.h"
++#include "Renderer_if.h"
++#include "ta.h"
++#include "spg.h"
++#include <map>
 +#ifdef __EMSCRIPTEN__
 +#include <emscripten.h>
 +#include "hw/sh4/sh4_core.h"  // for Sh4cntx (sh4ctx->pc)
 +extern u32 g_wasm_block_count;
 +#endif
- 
- bool pal_needs_update=true;
- 
-@@ -129,6 +134,16 @@ void pvr_WriteReg(u32 paddr,u32 data)
- 		return; // read only
- 
- 	case STARTRENDER_addr:
++
++bool pal_needs_update=true;
++
++u8 pvr_regs[pvr_RegSize];
++
++#define PVR_REG_NAME(r) { r##_addr, #r },
++const std::map<u32, const char *> pvr_reg_names = {
++		PVR_REG_NAME(ID)
++		PVR_REG_NAME(REVISION)
++		PVR_REG_NAME(SOFTRESET)
++		PVR_REG_NAME(STARTRENDER)
++		PVR_REG_NAME(TEST_SELECT)
++		PVR_REG_NAME(PARAM_BASE)
++		PVR_REG_NAME(REGION_BASE)
++		PVR_REG_NAME(SPAN_SORT_CFG)
++		PVR_REG_NAME(VO_BORDER_COL)
++		PVR_REG_NAME(FB_R_CTRL)
++		PVR_REG_NAME(FB_W_CTRL)
++		PVR_REG_NAME(FB_W_LINESTRIDE)
++		PVR_REG_NAME(FB_R_SOF1)
++		PVR_REG_NAME(FB_R_SOF2)
++		PVR_REG_NAME(FB_R_SIZE)
++		PVR_REG_NAME(FB_W_SOF1)
++		PVR_REG_NAME(FB_W_SOF2)
++		PVR_REG_NAME(FB_X_CLIP)
++		PVR_REG_NAME(FB_Y_CLIP)
++		PVR_REG_NAME(FPU_SHAD_SCALE)
++		PVR_REG_NAME(FPU_CULL_VAL)
++		PVR_REG_NAME(FPU_PARAM_CFG)
++		PVR_REG_NAME(HALF_OFFSET)
++		PVR_REG_NAME(FPU_PERP_VAL)
++		PVR_REG_NAME(ISP_BACKGND_D)
++		PVR_REG_NAME(ISP_BACKGND_T)
++		PVR_REG_NAME(ISP_FEED_CFG)
++		PVR_REG_NAME(SDRAM_REFRESH)
++		PVR_REG_NAME(SDRAM_ARB_CFG)
++		PVR_REG_NAME(SDRAM_CFG)
++		PVR_REG_NAME(FOG_COL_RAM)
++		PVR_REG_NAME(FOG_COL_VERT)
++		PVR_REG_NAME(FOG_DENSITY)
++		PVR_REG_NAME(FOG_CLAMP_MAX)
++		PVR_REG_NAME(FOG_CLAMP_MIN)
++		PVR_REG_NAME(SPG_TRIGGER_POS)
++		PVR_REG_NAME(SPG_HBLANK_INT)
++		PVR_REG_NAME(SPG_VBLANK_INT)
++		PVR_REG_NAME(SPG_CONTROL)
++		PVR_REG_NAME(SPG_HBLANK)
++		PVR_REG_NAME(SPG_LOAD)
++		PVR_REG_NAME(SPG_VBLANK)
++		PVR_REG_NAME(SPG_WIDTH)
++		PVR_REG_NAME(TEXT_CONTROL)
++		PVR_REG_NAME(VO_CONTROL)
++		PVR_REG_NAME(VO_STARTX)
++		PVR_REG_NAME(VO_STARTY)
++		PVR_REG_NAME(SCALER_CTL)
++		PVR_REG_NAME(PAL_RAM_CTRL)
++		PVR_REG_NAME(SPG_STATUS)
++		PVR_REG_NAME(FB_BURSTCTRL)
++		PVR_REG_NAME(FB_C_SOF)
++		PVR_REG_NAME(Y_COEFF)
++		PVR_REG_NAME(PT_ALPHA_REF)
++		PVR_REG_NAME(TA_OL_BASE)
++		PVR_REG_NAME(TA_ISP_BASE)
++		PVR_REG_NAME(TA_OL_LIMIT)
++		PVR_REG_NAME(TA_ISP_LIMIT)
++		PVR_REG_NAME(TA_NEXT_OPB)
++		PVR_REG_NAME(TA_ITP_CURRENT)
++		PVR_REG_NAME(TA_GLOB_TILE_CLIP)
++		PVR_REG_NAME(TA_ALLOC_CTRL)
++		PVR_REG_NAME(TA_LIST_INIT)
++		PVR_REG_NAME(TA_YUV_TEX_BASE)
++		PVR_REG_NAME(TA_YUV_TEX_CTRL)
++		PVR_REG_NAME(TA_YUV_TEX_CNT)
++		PVR_REG_NAME(TA_LIST_CONT)
++		PVR_REG_NAME(TA_NEXT_OPB_INIT)
++		PVR_REG_NAME(SIGNATURE1)
++		PVR_REG_NAME(SIGNATURE2)
++};
++#undef PVR_REG_NAME
++
++static const char *regName(u32 paddr)
++{
++	u32 addr = paddr & pvr_RegMask;
++	static char regName[32];
++	auto it = pvr_reg_names.find(addr);
++	if (it == pvr_reg_names.end())
++	{
++		if (addr >= FOG_TABLE_START_addr && addr <= FOG_TABLE_END_addr)
++			snprintf(regName, sizeof(regName), "FOG_TABLE[%x]", addr - FOG_TABLE_START_addr);
++		else if (addr >= TA_OL_POINTERS_START_addr && addr <= TA_OL_POINTERS_END_addr)
++			snprintf(regName, sizeof(regName), "TA_OL_POINTERS[%x]", addr - TA_OL_POINTERS_START_addr);
++		else if (addr >= PALETTE_RAM_START_addr && addr <= PALETTE_RAM_END_addr)
++			snprintf(regName, sizeof(regName), "PALETTE[%x]", addr - PALETTE_RAM_START_addr);
++		else
++			snprintf(regName, sizeof(regName), "?%08x", paddr);
++		return regName;
++	}
++	else
++		return it->second;
++}
++
++u32 pvr_ReadReg(u32 addr)
++{
++	if ((addr & pvr_RegMask) != SPG_STATUS_addr)
++		DEBUG_LOG(PVR, "read %s.%c == %x", regName(addr),
++				((addr >> 26) & 7) == 2 ? 'b' : (addr & 0x2000000) ? '1' : '0',
++						PvrReg(addr, u32));
++	return PvrReg(addr,u32);
++}
++
++void pvr_WriteReg(u32 paddr,u32 data)
++{
++	u32 addr = paddr & pvr_RegMask;
++	DEBUG_LOG(PVR, "write %s.%c = %x", regName(paddr),
++			((paddr >> 26) & 7) == 2 ? 'b' : (paddr & 0x2000000) ? '1' : '0',
++					data);
++
++	switch (addr)
++	{
++	case ID_addr:
++	case REVISION_addr:
++	case TA_YUV_TEX_CNT_addr:
++		return; // read only
++
++	case STARTRENDER_addr:
 +#ifdef __EMSCRIPTEN__
 +		{
 +			static int startrender_count = 0;
@@ -324,13 +1540,40 @@ index 0538b3c..a35fb9a 100644
 +				startrender_count, g_wasm_block_count, p_sh4rcb->cntx.pc);
 +		}
 +#endif
- 		rend_start_render();
- 		YUV_init();
- 		return;
-@@ -163,6 +178,21 @@ void pvr_WriteReg(u32 paddr,u32 data)
- 
- 	case FB_R_CTRL_addr:
- 		{
++		rend_start_render();
++		YUV_init();
++		return;
++
++	case TA_LIST_INIT_addr:
++		if (data >> 31)
++		{
++			ta_vtx_ListInit(false);
++			TA_NEXT_OPB = TA_NEXT_OPB_INIT;
++			TA_ITP_CURRENT = TA_ISP_BASE;
++		}
++		return;
++
++	case SOFTRESET_addr:
++		if (data & 1)
++			ta_vtx_SoftReset();
++		return;
++
++	case TA_LIST_CONT_addr:
++		//a write of anything works ?
++		ta_vtx_ListInit(true);
++		break;
++	
++	case SPG_CONTROL_addr:
++	case SPG_LOAD_addr:
++		if (PvrReg(addr, u32) != data)
++		{
++			PvrReg(addr, u32) = data;
++			CalculateSync();
++		}
++		return;
++
++	case FB_R_CTRL_addr:
++		{
 +#ifdef __EMSCRIPTEN__
 +			static int fb_r_ctrl_write_count = 0;
 +			fb_r_ctrl_write_count++;
@@ -346,24 +1589,95 @@ index 0538b3c..a35fb9a 100644
 +				fb_r_ctrl_write_count, g_wasm_block_count, sh4_pc,
 +				old_val, data);
 +#endif
- 			bool vclk_div_changed = (PvrReg(addr, u32) ^ data) & (1 << 23);
- 			PvrReg(addr, u32) = data;
- 			if (vclk_div_changed)
-@@ -191,6 +221,14 @@ void pvr_WriteReg(u32 paddr,u32 data)
- 
- 	case FB_R_SOF1_addr:
- 	case FB_R_SOF2_addr:
-+#ifdef __EMSCRIPTEN__
-+		EM_ASM({ console.log('[PVR-SOF-WR] blk=' + $0 +
-+			' reg=' + ($1 == 0x50 ? 'SOF1' : 'SOF2') +
-+			' val=0x' + ($2>>>0).toString(16) +
-+			' masked=0x' + (($2 & 0x00fffffc)>>>0).toString(16) +
-+			' pc=0x' + ($3>>>0).toString(16)); },
-+			g_wasm_block_count, addr, data, Sh4cntx.pc);
-+#endif
- 		data &= 0x00fffffc;
- 		rend_swap_frame(data);
- 		break;
++			bool vclk_div_changed = (PvrReg(addr, u32) ^ data) & (1 << 23);
++			PvrReg(addr, u32) = data;
++			if (vclk_div_changed)
++				CalculateSync();
++		}
++		return;
++
++	case FB_R_SIZE_addr:
++		if (PvrReg(addr, u32) != data)
++		{
++			PvrReg(addr, u32) = data;
++			fb_dirty = false;
++			check_framebuffer_write();
++		}
++		return;
++
++	case TA_YUV_TEX_BASE_addr:
++		PvrReg(addr, u32) = data & 0x00FFFFF8;
++		YUV_init();
++		return;
++
++	case TA_YUV_TEX_CTRL_addr:
++		PvrReg(addr, u32) = data;
++		YUV_init();
++		return;
++
++	case FB_R_SOF1_addr:
++	case FB_R_SOF2_addr:
++		data &= 0x00fffffc;
++		rend_swap_frame(data);
++		break;
++
++	case FB_W_SOF1_addr:
++		data &= 0x01fffffc;
++		rend_set_fb_write_addr(data);
++		break;
++
++	case FB_W_SOF2_addr:
++		data &= 0x01fffffc;
++		break;
++
++	case SPG_HBLANK_INT_addr:
++		data &= 0x03FF33FF;
++		if (data != SPG_HBLANK_INT.full) {
++			SPG_HBLANK_INT.full = data;
++			rescheduleSPG();
++		}
++		return;
++
++	case PAL_RAM_CTRL_addr:
++		pal_needs_update = pal_needs_update || ((data ^ PAL_RAM_CTRL) & 3) != 0;
++		break;
++
++	default:
++		if (addr >= PALETTE_RAM_START_addr && PvrReg(addr,u32) != data)
++			pal_needs_update = true;
++		else if (addr >= FOG_TABLE_START_addr && addr <= FOG_TABLE_END_addr && PvrReg(addr,u32) != data)
++			rend_updateFogTable();
++		break;
++	}
++	PvrReg(addr, u32) = data;
++}
++
++void Regs_Reset(bool hard)
++{
++	if (hard)
++		memset(&pvr_regs[0], 0, sizeof(pvr_regs));
++	ID_Reg              = 0x17FD11DB;
++	REVISION            = 0x00000011;
++	SOFTRESET           = 0x00000007;
++	SPG_HBLANK_INT.full = 0x031D0000;
++	SPG_VBLANK_INT.full = 0x00150104;
++	FPU_PARAM_CFG       = 0x0007DF77;
++	HALF_OFFSET         = 0x00000007;
++	ISP_FEED_CFG        = 0x00402000;
++	SDRAM_REFRESH       = 0x00000020;
++	SDRAM_ARB_CFG       = 0x0000001F;
++	SDRAM_CFG           = 0x15F28997;
++	SPG_HBLANK.full     = 0x007E0345;
++	SPG_LOAD.full       = 0x01060359;
++	SPG_VBLANK.full     = 0x01500104;
++	SPG_WIDTH.full      = 0x07F1933F;
++	VO_CONTROL.full     = 0x00000108;
++	VO_STARTX.full      = 0x0000009D;
++	VO_STARTY.full      = 0x00150015;
++	SCALER_CTL.full     = 0x00000400;
++	FB_BURSTCTRL        = 0x00090639;
++	PT_ALPHA_REF        = 0x000000FF;
++}
 diff --git a/core/hw/sh4/dyna/driver.cpp b/core/hw/sh4/dyna/driver.cpp
 index 4e1fbf3..4f61459 100644
 --- a/core/hw/sh4/dyna/driver.cpp
@@ -600,6 +1914,32 @@ index 143d093..5b72309 100644
  #define DECLARE_CODE_CACHE(Name, Size) static u8 *Name;
  #elif defined(__ANDROID__)
  #define DECLARE_CODE_CACHE(Name, Size) alignas(4096) static u8 Name[Size];
+diff --git a/core/ui/gui.cpp b/core/ui/gui.cpp
+index 0f29057..4f87441 100644
+--- a/core/ui/gui.cpp
++++ b/core/ui/gui.cpp
+@@ -17,6 +17,9 @@
+     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
+  */
+ #include "gui.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include "rend/osd.h"
+ #include "cfg/cfg.h"
+ #include "imgui.h"
+@@ -1716,6 +1719,11 @@ void fatal_error(const char* text, ...)
+     vsnprintf(temp, sizeof(temp), text, args);
+     va_end(args);
+     ERROR_LOG(COMMON, "%s", temp);
++#ifdef __EMSCRIPTEN__
++    // Make fatal errors visible in browser console (ERROR_LOG and os_notify
++    // don't reach console.log on Emscripten)
++    EM_ASM({ console.error('[FATAL] ' + UTF8ToString($0)); }, temp);
++#endif
+ 
+     os_notify("Fatal Error", 20000, temp);
+ }
 diff --git a/shell/cmake/DetectArchitecture.cmake b/shell/cmake/DetectArchitecture.cmake
 index 9a4b855..031fd86 100644
 --- a/shell/cmake/DetectArchitecture.cmake

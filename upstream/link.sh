@@ -47,6 +47,7 @@ emcc -O3 -flto \
   -s ALLOW_MEMORY_GROWTH=1 \
   -s ASYNCIFY=1 \
   -s ASYNCIFY_STACK_SIZE=65536 \
+  -s 'ASYNCIFY_REMOVE=["Sh4Interpreter::*","i0*","i1*","addrspace::*","mmu_*","aica::*","Pvr*","pvr*","*ReadMem*","*WriteMem*","sh4_sched_tick*","*TA_*Param*"]' \
   -s EXIT_RUNTIME=0 \
   -s FORCE_FILESYSTEM=1 \
   -s WARN_ON_UNDEFINED_SYMBOLS=0 \
