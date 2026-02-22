@@ -1132,7 +1132,7 @@ index 9a4b855..031fd86 100644
  detect_architecture("__aarch64__" arm64)
  detect_architecture("_M_ARM64" arm64)
 diff --git a/shell/libretro/libretro.cpp b/shell/libretro/libretro.cpp
-index 9dcc6b3..b924625 100644
+index 9dcc6b3..0e6b1bc 100644
 --- a/shell/libretro/libretro.cpp
 +++ b/shell/libretro/libretro.cpp
 @@ -18,6 +18,9 @@
@@ -1168,7 +1168,7 @@ index 9dcc6b3..b924625 100644
  	video_cb(is_dupe ? 0 : RETRO_HW_FRAME_BUFFER_VALID, framebufferWidth, framebufferHeight, 0);
  
  	if (!config::ThreadedRendering || config::LimitFPS)
-@@ -3579,24 +3598,27 @@ static void retro_keyboard_event(bool down, unsigned keycode, uint32_t character
+@@ -3579,24 +3598,30 @@ static void retro_keyboard_event(bool down, unsigned keycode, uint32_t character
  
  void fatal_error(const char* text, ...)
  {
@@ -1188,6 +1188,9 @@ index 9dcc6b3..b924625 100644
 -		strcat(temp, "\n");
  		log_cb(RETRO_LOG_ERROR, temp);
 -	}
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ console.error('[FATAL] ' + UTF8ToString($0)); }, temp);
++#endif
  }
  
  [[noreturn]] void os_DebugBreak()
