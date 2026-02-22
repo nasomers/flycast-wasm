@@ -846,7 +846,7 @@ index 0538b3c..836d160 100644
 +	PT_ALPHA_REF        = 0x000000FF;
 +}
 diff --git a/core/hw/sh4/dyna/driver.cpp b/core/hw/sh4/dyna/driver.cpp
-index 4e1fbf3..4f61459 100644
+index 4e1fbf3..8c6d102 100644
 --- a/core/hw/sh4/dyna/driver.cpp
 +++ b/core/hw/sh4/dyna/driver.cpp
 @@ -1,6 +1,10 @@
@@ -871,7 +871,17 @@ index 4e1fbf3..4f61459 100644
  constexpr u32 CODE_SIZE = 10_MB;
  constexpr u32 TEMP_CODE_SIZE = 1_MB;
  constexpr u32 FULL_SIZE = CODE_SIZE + TEMP_CODE_SIZE;
-@@ -342,26 +350,54 @@ void Sh4Recompiler::Reset(bool hard)
+@@ -74,6 +82,9 @@ void Sh4Recompiler::clear_temp_cache(bool full)
+ 	//printf("recSh4:Temp Code Cache clear at %08X\n", curr_pc);
+ 	codeBuffer.reset(true);
+ 	bm_ResetTempCache(full);
++	// Sync WASM JIT caches — JS block cache and blockByVaddr have stale entries
++	// after temp blocks are evicted from the C++ block map
++	sh4Dynarec->reset();
+ }
+ 
+ void Sh4Recompiler::ResetCache()
+@@ -342,26 +353,54 @@ void Sh4Recompiler::Reset(bool hard)
  void Sh4Recompiler::Init()
  {
  	INFO_LOG(DYNAREC, "Sh4Recompiler::Init");
@@ -1081,6 +1091,32 @@ index 143d093..5b72309 100644
  #define DECLARE_CODE_CACHE(Name, Size) static u8 *Name;
  #elif defined(__ANDROID__)
  #define DECLARE_CODE_CACHE(Name, Size) alignas(4096) static u8 Name[Size];
+diff --git a/core/ui/gui.cpp b/core/ui/gui.cpp
+index 0f29057..4f87441 100644
+--- a/core/ui/gui.cpp
++++ b/core/ui/gui.cpp
+@@ -17,6 +17,9 @@
+     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
+  */
+ #include "gui.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include "rend/osd.h"
+ #include "cfg/cfg.h"
+ #include "imgui.h"
+@@ -1716,6 +1719,11 @@ void fatal_error(const char* text, ...)
+     vsnprintf(temp, sizeof(temp), text, args);
+     va_end(args);
+     ERROR_LOG(COMMON, "%s", temp);
++#ifdef __EMSCRIPTEN__
++    // Make fatal errors visible in browser console (ERROR_LOG and os_notify
++    // don't reach console.log on Emscripten)
++    EM_ASM({ console.error('[FATAL] ' + UTF8ToString($0)); }, temp);
++#endif
+ 
+     os_notify("Fatal Error", 20000, temp);
+ }
 diff --git a/shell/cmake/DetectArchitecture.cmake b/shell/cmake/DetectArchitecture.cmake
 index 9a4b855..031fd86 100644
 --- a/shell/cmake/DetectArchitecture.cmake

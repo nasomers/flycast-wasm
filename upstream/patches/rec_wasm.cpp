@@ -1663,21 +1663,6 @@ public:
 						g_wasm_block_count += nblocks;
 
 						int result = wasm_slice_result();
-#ifdef __EMSCRIPTEN__
-						static u32 slice_diag_count = 0;
-						if (slice_diag_count < 30) {
-							u32 dpc = sh4ctx->pc;
-							EM_ASM({ console.log("[SLICE] #" + $0 +
-								" result=" + $1 +
-								" nblocks=" + $2 +
-								" cc=" + $3 +
-								" pc=0x" + ($4>>>0).toString(16) +
-								" cache=" + $5); },
-								slice_diag_count, result, nblocks,
-								sh4ctx->cycle_counter, dpc, wasm_cache_size());
-							slice_diag_count++;
-						}
-#endif
 
 						if (result == 0) {
 							break;  // timeslice complete
