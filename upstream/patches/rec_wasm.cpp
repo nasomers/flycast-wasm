@@ -1058,19 +1058,15 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 	}
 #else
-	// SHIL executor — charge guest_opcodes upfront, let natural penalties accumulate.
-	//
-	// Key insight: DO NOT force-reset cycle_counter after SHIL execution.
-	// SHIL memory ops (shop_readm/writem) go through the SH4 cache subsystem
-	// which calls addReadAccessCycles/addWriteAccessCycles, naturally modifying
-	// cycle_counter. Force-resetting would UNDO these natural penalties,
-	// causing accumulated timing drift vs the ref executor.
+	// SHIL executor — charge guest_cycles upfront, forced reset after.
+	// See FINDINGS comment in compile() for timing investigation results.
 	{
-		ctx.cycle_counter -= block->guest_opcodes;
+		int cc_pre = ctx.cycle_counter;
+		ctx.cycle_counter -= block->guest_cycles;
 		g_ifb_exception_pending = false;
 		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
-		// NO forced reset — let natural cache/memory penalties stick.
+		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
 		applyBlockExitCpp(block);
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
@@ -1393,6 +1389,27 @@ public:
 	{
 #ifdef __EMSCRIPTEN__
 		EM_ASM({ console.log('[rec_wasm] WasmDynarec::init() — Phase 2 WASM JIT'); });
+		EM_ASM({ console.log('[FINDINGS] SHIL executor timing investigation results:'); });
+		EM_ASM({ console.log('[FINDINGS] - Mode 0 (ref_execute_block + flat -1/instr) = PASS'); });
+		EM_ASM({ console.log('[FINDINGS] - Mode 1 (SHIL + guest_cycles) = FAIL_BLACK, diverges from mode 0 at ~3.2M blocks'); });
+		EM_ASM({ console.log('[FINDINGS] - Root cause: accumulated cycle_counter drift from different charging models'); });
+		EM_ASM({ console.log('[FINDINGS] - Mode 0 charges: flat -1/iteration + IReadMem16 cache penalties (sh4_cache.h)'); });
+		EM_ASM({ console.log('[FINDINGS] - Mode 1 charges: guest_cycles upfront (SH4 timing tables via countCycles)'); });
+		EM_ASM({ console.log('[FINDINGS] - guest_cycles != sum(flat -1) because different timing models'); });
+		EM_ASM({ console.log('[FINDINGS] - Upstream interpreter uses executeCycles(op) (per-instruction, varies by type)'); });
+		EM_ASM({ console.log('[FINDINGS] - Sh4Cycles class (sh4_cycles.h): executeCycles, addReadAccessCycles, addWriteAccessCycles'); });
+		EM_ASM({ console.log('[FINDINGS] - Timer reads (TMU TCNT0 at 0xFFD8000C) depend on cycle_counter via now()'); });
+		EM_ASM({ console.log('[FINDINGS] - Drift causes timer read divergence -> branch divergence -> fb_enable never set'); });
+		EM_ASM({ console.log('[FINDINGS] - ATTEMPTED FIXES (all worse than baseline):'); });
+		EM_ASM({ console.log('[FINDINGS]   1. guest_offs per-instruction charging: diverges at 2.5M (earlier!)'); });
+		EM_ASM({ console.log('[FINDINGS]   2. delay_slot-aware charging: same 2.5M divergence'); });
+		EM_ASM({ console.log('[FINDINGS]   3. guest_opcodes instead of guest_cycles: 2.5M divergence'); });
+		EM_ASM({ console.log('[FINDINGS]   4. No forced reset (natural penalties): 2.5M divergence'); });
+		EM_ASM({ console.log('[FINDINGS] - CONCLUSION: per-instruction charging adds error faster than it corrects.'); });
+		EM_ASM({ console.log('[FINDINGS]   The baseline guest_cycles model (3.2M divergence) is closest to working.'); });
+		EM_ASM({ console.log('[FINDINGS] - NEXT STEPS: need to either match ref_execute_block exactly (call'); });
+		EM_ASM({ console.log('[FINDINGS]   executeCycles per SH4 instruction) or find a way to make the BIOS'); });
+		EM_ASM({ console.log('[FINDINGS]   tolerate the timing drift (e.g., longer test, different BIOS version).'); });
 #endif
 		sh4ctx = &ctx;
 		codeBuffer = &buf;
