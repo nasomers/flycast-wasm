@@ -774,7 +774,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 4
+#define EXECUTOR_MODE 1
 
 static u32 pc_hash = 0;
 u32 g_wasm_block_count = 0;  // global so pvr_regs.cpp can reference it
@@ -1044,13 +1044,16 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 	}
 #else
-	// Pure SHIL executor - charge guest_cycles BEFORE ops (like x64 JIT).
+	// Pure SHIL executor - charge guest_cycles AFTER ops.
+	// Charging after ensures I/O register reads during execution see the
+	// correct cycle_counter (matching ref interpreter timing), which prevents
+	// timer/DMA reads from returning different values and causing divergence.
 	{
-		ctx.cycle_counter -= block->guest_cycles;
 		g_ifb_exception_pending = false;
 		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
 		applyBlockExitCpp(block);
+		ctx.cycle_counter -= block->guest_cycles;
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
 			g_ifb_exception_pending = false;
