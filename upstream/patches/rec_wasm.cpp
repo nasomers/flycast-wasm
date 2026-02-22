@@ -698,7 +698,7 @@ extern u32 g_wasm_block_count;
 // #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
 // Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
 // which made per-instruction cycle charging always active in ref_execute_block.
-#define EXECUTOR_MODE 4
+#define EXECUTOR_MODE 3
 #define SHIL_START_BLOCK 2360000
 
 // Reference executor: per-instruction via OpPtr
@@ -826,17 +826,128 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
 		// Use ref's own PC (not applyBlockExitCpp)
 	} else {
-		// Mode 1 SHIL path: guest_cycles + SHIL ops + forced reset + applyBlockExitCpp
-		int cc_pre = ctx.cycle_counter;
-		ctx.cycle_counter -= block->guest_cycles;
-		g_ifb_exception_pending = false;
-		for (u32 i = 0; i < block->oplist.size(); i++)
-			wasm_exec_shil_fb(block->vaddr, i);
-		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
-		applyBlockExitCpp(block);
-		if (g_ifb_exception_pending) {
-			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
+		// Mode 3 SHIL path with diagnostic shadow for first N blocks after switchover.
+		// For first 20 SHIL blocks: run ref first, then SHIL, compare results.
+		// After that: pure SHIL.
+		u32 shil_idx = g_wasm_block_count - SHIL_START_BLOCK;
+		bool diag = (shil_idx < 20);
+
+		if (diag) {
+			// === DIAGNOSTIC SHADOW: run BOTH ref and SHIL, compare ===
+			// Save pre-block state
+			alignas(16) static u8 diag_backup[sizeof(Sh4Context)];
+			memcpy(diag_backup, &ctx, sizeof(Sh4Context));
+
+			// Run ref (correct)
+			int cc_pre = ctx.cycle_counter;
+			ctx.cycle_counter -= block->guest_cycles;
+			ref_execute_block(block);
+			ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
+			u32 ref_pc = ctx.pc;
+			u32 ref_jdyn = ctx.jdyn;
+
+			// Save ref result
+			alignas(16) static u8 diag_ref[sizeof(Sh4Context)];
+			memcpy(diag_ref, &ctx, sizeof(Sh4Context));
+			Sh4Context& ref_ctx = *(Sh4Context*)diag_ref;
+
+			// Restore pre-block state for SHIL
+			memcpy(&ctx, diag_backup, sizeof(Sh4Context));
+
+			// Run SHIL
+			cc_pre = ctx.cycle_counter;
+			ctx.cycle_counter -= block->guest_cycles;
+			u32 jdyn_before = ctx.jdyn;
 			g_ifb_exception_pending = false;
+			for (u32 i = 0; i < block->oplist.size(); i++)
+				wasm_exec_shil_fb(block->vaddr, i);
+			ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
+			u32 jdyn_after = ctx.jdyn;
+			applyBlockExitCpp(block);
+			u32 shil_pc = ctx.pc;
+
+			// Check if shop_jdyn is in the oplist
+			bool has_jdyn = false;
+			for (u32 i = 0; i < block->oplist.size(); i++) {
+				if (block->oplist[i].op == shop_jdyn) has_jdyn = true;
+			}
+
+			// Log comparison
+#ifdef __EMSCRIPTEN__
+			EM_ASM({ console.log('[DIAG] shil_idx=' + $0 +
+				' blk_pc=0x' + ($1>>>0).toString(16) +
+				' bt=' + $2 +
+				' ref_pc=0x' + ($3>>>0).toString(16) +
+				' shil_pc=0x' + ($4>>>0).toString(16) +
+				' MATCH=' + ($3 == $4 ? 'YES' : '***NO***') +
+				' jdyn_before=0x' + ($5>>>0).toString(16) +
+				' jdyn_after=0x' + ($6>>>0).toString(16) +
+				' ref_jdyn=0x' + ($7>>>0).toString(16) +
+				' has_jdyn=' + $8 +
+				' nops=' + $9 +
+				' branch=0x' + ($10>>>0).toString(16) +
+				' next=0x' + ($11>>>0).toString(16)); },
+				shil_idx, block->vaddr, (int)block->BlockType,
+				ref_pc, shil_pc,
+				jdyn_before, jdyn_after, ref_jdyn,
+				has_jdyn ? 1 : 0,
+				(u32)block->oplist.size(),
+				block->BranchBlock, block->NextBlock);
+
+			// If mismatch, dump register diffs
+			if (ref_pc != shil_pc) {
+				EM_ASM({ console.log('[DIAG-REG] r0=0x' + ($0>>>0).toString(16) +
+					'/0x' + ($1>>>0).toString(16) +
+					' r4=0x' + ($2>>>0).toString(16) +
+					'/0x' + ($3>>>0).toString(16) +
+					' r15=0x' + ($4>>>0).toString(16) +
+					'/0x' + ($5>>>0).toString(16) +
+					' T=' + $6 + '/' + $7 +
+					' pr=0x' + ($8>>>0).toString(16) +
+					'/0x' + ($9>>>0).toString(16)); },
+					ref_ctx.r[0], ctx.r[0],
+					ref_ctx.r[4], ctx.r[4],
+					ref_ctx.r[15], ctx.r[15],
+					ref_ctx.sr.T, ctx.sr.T,
+					ref_ctx.pr, ctx.pr);
+
+				// Dump the SHIL oplist
+				for (u32 i = 0; i < block->oplist.size() && i < 30; i++) {
+					auto& sop = block->oplist[i];
+					EM_ASM({ console.log('[DIAG-OP] [' + $0 + '] shop=' + $1 +
+						' rd=' + $2 + ':0x' + ($3>>>0).toString(16) +
+						' rs1=' + $4 + ':0x' + ($5>>>0).toString(16) +
+						' rs2=' + $6 + ':0x' + ($7>>>0).toString(16) +
+						' size=' + $8); },
+						i, (int)sop.op,
+						(int)sop.rd.type, sop.rd._imm,
+						(int)sop.rs1.type, sop.rs1._imm,
+						(int)sop.rs2.type, sop.rs2._imm,
+						sop.size);
+				}
+			}
+#endif
+			// Use ref's result to continue (so next block starts from correct state)
+			memcpy(&ctx, diag_ref, sizeof(Sh4Context));
+
+			if (g_ifb_exception_pending) {
+				// Still need to handle deferred exceptions from SHIL
+				// but since we restored ref, just clear it
+				g_ifb_exception_pending = false;
+			}
+		} else {
+			// Pure SHIL (no diagnostic)
+			int cc_pre = ctx.cycle_counter;
+			ctx.cycle_counter -= block->guest_cycles;
+			g_ifb_exception_pending = false;
+			for (u32 i = 0; i < block->oplist.size(); i++)
+				wasm_exec_shil_fb(block->vaddr, i);
+			ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
+			applyBlockExitCpp(block);
+			if (g_ifb_exception_pending) {
+				Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
+				g_ifb_exception_pending = false;
+			}
 		}
 	}
 #elif EXECUTOR_MODE == 2
