@@ -473,14 +473,22 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 			u32 phys = addr & 0x1FFFFFFF;
 			if (phys >= 0x005F8000 && phys <= 0x005F9FFF) {
 				g_shil_pvr_write_count++;
+				u32 val = 0;
+				if (op.size == 8) {
+					val = *(u32*)((u8*)&ctx + op.rs2.reg_offset());
+				} else {
+					val = readI32(op.rs2);
+				}
 #ifdef __EMSCRIPTEN__
-				if (g_shil_pvr_write_count <= 30) {
-					u32 val = 0;
-					if (op.size == 8) {
-						val = *(u32*)((u8*)&ctx + op.rs2.reg_offset());
-					} else {
-						val = readI32(op.rs2);
-					}
+				// Always log writes to critical PVR registers
+				bool is_critical = (phys == 0x005F8044) || // FB_R_CTRL
+				                   (phys == 0x005F8048) || // FB_W_CTRL
+				                   (phys == 0x005F8014) || // STARTRENDER
+				                   (phys == 0x005F8060) || // FB_W_SOF1
+				                   (phys == 0x005F8064) || // FB_W_SOF2
+				                   (phys == 0x005F8068) || // FB_R_SOF1
+				                   (phys == 0x005F806C);   // FB_R_SOF2
+				if (g_shil_pvr_write_count <= 50 || is_critical) {
 					EM_ASM({ console.log('[PVR-WR] #' + $0 +
 						' addr=0x' + ($1>>>0).toString(16) +
 						' val=0x' + ($2>>>0).toString(16) +
@@ -1049,7 +1057,10 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 #if EXECUTOR_MODE == 6
 	if (block_count == 1000 || block_count == 10000 || block_count == 100000 ||
 	    block_count == 500000 || block_count == 1000000 || block_count == 2000000 ||
-	    block_count == 3000000 || block_count == 4000000) {
+	    block_count == 3000000 || block_count == 4000000 ||
+	    block_count == 5000000 || block_count == 6000000 ||
+	    block_count == 8000000 || block_count == 10000000 ||
+	    block_count == 15000000 || block_count == 20000000) {
 		EM_ASM({ console.log('[SHIL-IO] blk=' + $0 +
 			' reads=' + $1 + ' writes=' + $2 +
 			' pvr_wr=' + $3 + ' sq_wr=' + $4); },
@@ -1057,16 +1068,18 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			g_shil_pvr_write_count, g_shil_sq_write_count);
 
 		// Read key PVR registers directly
+		u32 fb_r_ctrl = ReadMem32(0xA05F8044);
 		u32 fb_w_ctrl = ReadMem32(0xA05F8048);
 		u32 spg_ctrl = ReadMem32(0xA05F80D0);
-		u32 vo_ctrl = ReadMem32(0xA05F80E8);
-		u32 fb_sof1 = ReadMem32(0xA05F8060);
+		u32 fb_r_sof1 = ReadMem32(0xA05F8068);
+		u32 fb_r_sof2 = ReadMem32(0xA05F806C);
 		EM_ASM({ console.log('[PVR-REG] blk=' + $0 +
-			' FB_W_CTRL=0x' + ($1>>>0).toString(16) +
-			' SPG_CTRL=0x' + ($2>>>0).toString(16) +
-			' VO_CTRL=0x' + ($3>>>0).toString(16) +
-			' FB_SOF1=0x' + ($4>>>0).toString(16)); },
-			block_count, fb_w_ctrl, spg_ctrl, vo_ctrl, fb_sof1);
+			' FB_R_CTRL=0x' + ($1>>>0).toString(16) +
+			' FB_W_CTRL=0x' + ($2>>>0).toString(16) +
+			' SPG_CTRL=0x' + ($3>>>0).toString(16) +
+			' FB_R_SOF1=0x' + ($4>>>0).toString(16) +
+			' FB_R_SOF2=0x' + ($5>>>0).toString(16)); },
+			block_count, fb_r_ctrl, fb_w_ctrl, spg_ctrl, fb_r_sof1, fb_r_sof2);
 	}
 #endif
 #endif
