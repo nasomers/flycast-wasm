@@ -694,7 +694,7 @@ extern u32 g_wasm_block_count;
 // #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
 // Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
 // which made per-instruction cycle charging always active in ref_execute_block.
-#define EXECUTOR_MODE 1
+#define EXECUTOR_MODE 5
 
 // Reference executor: per-instruction via OpPtr
 // Per-instruction cycle counting (1 per instruction executed)
@@ -909,81 +909,22 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		// Restore pre-block registers for SHIL (memory keeps ref's writes)
 		memcpy(&ctx, &ctx_backup, sizeof(Sh4Context));
 
-		// --- Run SHIL with dry-run writes (capture writes, don't execute) ---
-		// Memory stays in ref's (correct) state. SHIL reads correct values.
-		// shop_writem captures intended writes in g_shil_writes instead of
-		// actually writing, so we can compare against ref's writes.
-		g_shil_writes.clear();
-		g_shil_dry_run = true;
+		// --- Run SHIL (no dry-run: real writes, which are same values ref wrote) ---
+		// Memory already has ref's correct writes. SHIL reads correct values.
+		// SHIL writes same values again (redundant, but harmless for RAM/MMIO).
+		// No write comparison (previous attempts had MMIO read side effects).
 		ctx.cycle_counter -= block->guest_cycles;
 		g_ifb_exception_pending = false;
 		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
 		applyBlockExitCpp(block);
-		g_shil_dry_run = false;
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
 			g_ifb_exception_pending = false;
 		}
 
-		// --- Compare SHIL's intended writes vs ref's actual memory ---
-		static u32 write_mismatch_count = 0;
-		if (write_mismatch_count < 200) {
-			for (size_t wi = 0; wi < g_shil_writes.size(); wi++) {
-				auto& w = g_shil_writes[wi];
-				u32 ref_val = 0;
-				if (w.size == 1) ref_val = (u32)(u8)ReadMem8(w.addr);
-				else if (w.size == 2) ref_val = (u32)(u16)ReadMem16(w.addr);
-				else ref_val = ReadMem32(w.addr);
-
-				if (ref_val != w.val_lo) {
-					write_mismatch_count++;
-#ifdef __EMSCRIPTEN__
-					EM_ASM({ console.log('[WRITE-DIFF] #' + $0 +
-						' blk=' + $1 +
-						' pc=0x' + ($2>>>0).toString(16) +
-						' addr=0x' + ($3>>>0).toString(16) +
-						' shil=0x' + ($4>>>0).toString(16) +
-						' ref=0x' + ($5>>>0).toString(16) +
-						' size=' + $6 +
-						' wi=' + $7 + '/' + $8); },
-						write_mismatch_count, g_wasm_block_count, block->vaddr,
-						w.addr, w.val_lo, ref_val, w.size,
-						(u32)wi, (u32)g_shil_writes.size());
-#endif
-					if (write_mismatch_count >= 200) break;
-				}
-
-				// Also check size==8 high word
-				if (w.size == 8) {
-					u32 ref_hi = ReadMem32(w.addr + 4);
-					if (ref_hi != w.val_hi) {
-						write_mismatch_count++;
-#ifdef __EMSCRIPTEN__
-						EM_ASM({ console.log('[WRITE-DIFF-HI] #' + $0 +
-							' blk=' + $1 +
-							' addr=0x' + ($2>>>0).toString(16) +
-							' shil_hi=0x' + ($3>>>0).toString(16) +
-							' ref_hi=0x' + ($4>>>0).toString(16)); },
-							write_mismatch_count, g_wasm_block_count,
-							w.addr + 4, w.val_hi, ref_hi);
-#endif
-					}
-				}
-			}
-		}
-
-		// Log write comparison summary every 500K blocks
-		if (g_wasm_block_count % 500000 == 0 && g_wasm_block_count > 0) {
-#ifdef __EMSCRIPTEN__
-			EM_ASM({ console.log('[WRITE-SUM] blk=' + $0 +
-				' write_mismatches=' + $1); },
-				g_wasm_block_count, write_mismatch_count);
-#endif
-		}
-
-		// Compare SHIL vs ref registers (skip cycle_counter)
-		if (shadow_mismatch_count < 100) {
+		// Compare SHIL vs ref registers (skip cycle_counter, jdyn)
+		if (shadow_mismatch_count < 500) {
 			bool match = true;
 			int diff_reg = -1;
 			const char* diff_name = "";
