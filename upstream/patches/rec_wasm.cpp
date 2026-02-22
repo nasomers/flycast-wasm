@@ -60,6 +60,10 @@ int wasm_has_block(u32 block_pc);
 void wasm_clear_cache();
 void wasm_remove_block(u32 block_pc);
 int wasm_cache_size();
+double wasm_prof_compile_ms();
+double wasm_prof_exec_sample_ms();
+int wasm_prof_exec_samples();
+int wasm_prof_exec_count();
 }
 #endif
 
@@ -98,6 +102,15 @@ static u32 g_shil_write_count = 0;
 static u32 g_shil_read_count = 0;
 static u32 g_shil_pvr_write_count = 0;
 static u32 g_shil_sq_write_count = 0;
+
+// ============================================================
+// Profiling counters
+// ============================================================
+static u32 prof_native_ops_compiled = 0;   // SHIL ops compiled to native WASM
+static u32 prof_fallback_ops_compiled = 0; // SHIL ops compiled as C++ fallback
+static u32 prof_fb_by_op[128] = {};        // runtime fallback calls by op type
+static double prof_emulation_ms = 0;       // time in inner block dispatch loop
+static double prof_system_ms = 0;          // time in UpdateSystem_INTC
 
 // ============================================================
 // Memory access cycle penalties — approximates Sh4Cycles
@@ -713,6 +726,9 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 		break;
 	}
 
+	// Profiling: count runtime fallback calls by op type
+	if ((int)op.op >= 0 && (int)op.op < 128) prof_fb_by_op[(int)op.op]++;
+
 #ifdef __EMSCRIPTEN__
 	if (trace_this) {
 		u32 r0_after = ctx.r[0];
@@ -1289,6 +1305,8 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 #ifdef __EMSCRIPTEN__
 
 EM_JS(int, wasm_compile_block, (const u8* bytesPtr, u32 len, u32 block_pc), {
+	if (!Module._prof) Module._prof = { compileMs: 0, execMs: 0, execSamples: 0, execCount: 0 };
+	var t0 = performance.now();
 	try {
 		var wasmBytes = Module.HEAPU8.slice(bytesPtr, bytesPtr + len);
 		var mod = new WebAssembly.Module(wasmBytes);
@@ -1307,6 +1325,7 @@ EM_JS(int, wasm_compile_block, (const u8* bytesPtr, u32 len, u32 block_pc), {
 		});
 		if (!Module._wasmBlockCache) Module._wasmBlockCache = {};
 		Module._wasmBlockCache[block_pc] = instance.exports.b;
+		Module._prof.compileMs += performance.now() - t0;
 		return 1;
 	} catch (e) {
 		console.error('[rec_wasm] compile fail PC=0x' + (block_pc >>> 0).toString(16) + ': ' + e.message);
@@ -1316,7 +1335,16 @@ EM_JS(int, wasm_compile_block, (const u8* bytesPtr, u32 len, u32 block_pc), {
 
 EM_JS(int, wasm_execute_block, (u32 block_pc, u32 ctx_ptr, u32 ram_base), {
 	try {
-		Module._wasmBlockCache[block_pc](ctx_ptr, ram_base);
+		Module._prof.execCount++;
+		// Sample every 1000th call for timing (overhead: ~0.1%)
+		if ((Module._prof.execCount & 0x3FF) === 0) {
+			var t0 = performance.now();
+			Module._wasmBlockCache[block_pc](ctx_ptr, ram_base);
+			Module._prof.execMs += performance.now() - t0;
+			Module._prof.execSamples++;
+		} else {
+			Module._wasmBlockCache[block_pc](ctx_ptr, ram_base);
+		}
 		return 0;
 	} catch (e) {
 		if (!Module._wasmTrapCount) Module._wasmTrapCount = 0;
@@ -1344,6 +1372,20 @@ EM_JS(int, wasm_cache_size, (), {
 	return Module._wasmBlockCache ? Object.keys(Module._wasmBlockCache).length : 0;
 });
 
+// Profiling data readers
+EM_JS(double, wasm_prof_compile_ms, (), {
+	return Module._prof ? Module._prof.compileMs : 0;
+});
+EM_JS(double, wasm_prof_exec_sample_ms, (), {
+	return Module._prof ? Module._prof.execMs : 0;
+});
+EM_JS(int, wasm_prof_exec_samples, (), {
+	return Module._prof ? Module._prof.execSamples : 0;
+});
+EM_JS(int, wasm_prof_exec_count, (), {
+	return Module._prof ? Module._prof.execCount : 0;
+});
+
 #else
 static int wasm_compile_block(const u8*, u32, u32) { return 0; }
 static int wasm_execute_block(u32, u32, u32) { return 0; }
@@ -1351,6 +1393,10 @@ static int wasm_has_block(u32) { return 0; }
 static void wasm_remove_block(u32) {}
 static void wasm_clear_cache() {}
 static int wasm_cache_size() { return 0; }
+static double wasm_prof_compile_ms() { return 0; }
+static double wasm_prof_exec_sample_ms() { return 0; }
+static int wasm_prof_exec_samples() { return 0; }
+static int wasm_prof_exec_count() { return 0; }
 #endif
 
 // ============================================================
@@ -1419,10 +1465,13 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	for (u32 i = 0; i < block->oplist.size(); i++) {
 		shil_opcode& op = block->oplist[i];
 		if (!emitShilOp(b, op, block, i)) {
+			prof_fallback_ops_compiled++;
 			// Unhandled op — call SHIL canonical fallback
 			b.op_i32_const((s32)block->vaddr);
 			b.op_i32_const((s32)i);
 			b.op_call(WIMPORT_SHIL_FB);
+		} else {
+			prof_native_ops_compiled++;
 		}
 	}
 
@@ -1513,10 +1562,13 @@ public:
 		u32 blockExecs = 0;
 		u32 interpExecs = 0;
 		u32 timeslices = 0;
+		double ml_start = emscripten_get_now();
+		u32 fb_count_start = g_shil_fb_call_count;
 
 		try {
 			do {
 				try {
+					double emu_t0 = emscripten_get_now();
 					do {
 						u32 pc = sh4ctx->pc;
 						auto it = blockByVaddr.find(pc);
@@ -1532,7 +1584,6 @@ public:
 							if (hit != blockCodeHash.end()) {
 								u32 curOp = (u32)IReadMem16(pc);
 								if (curOp != hit->second) {
-									// Invalidate stale block and fall through to interpreter
 									wasm_remove_block(pc);
 									blockCodeHash.erase(pc);
 									blockByVaddr.erase(pc);
@@ -1548,7 +1599,6 @@ public:
 							if (sh4ctx->interrupt_pend)
 								UpdateINTC();
 						} else {
-							// Interpreter fallback — one instruction
 							sh4ctx->pc = pc + 2;
 							u16 op = IReadMem16(pc);
 							if (sh4ctx->sr.FD == 1 && OpDesc[op]->IsFloatingPoint())
@@ -1560,19 +1610,16 @@ public:
 
 					} while (sh4ctx->cycle_counter > 0);
 
-#ifdef __EMSCRIPTEN__
-					if (timeslices < 10) {
-						EM_ASM({ console.log('[TS] #' + $0 +
-							' cc_end=' + ($1|0) +
-							' blks=' + $2 +
-							' pc=0x' + ($3>>>0).toString(16)); },
-							timeslices, sh4ctx->cycle_counter,
-							blockExecs, sh4ctx->pc);
-					}
-#endif
+					double emu_t1 = emscripten_get_now();
+					prof_emulation_ms += (emu_t1 - emu_t0);
+
 					sh4ctx->cycle_counter += SH4_TIMESLICE;
 					timeslices++;
+
+					double sys_t0 = emscripten_get_now();
 					UpdateSystem_INTC();
+					double sys_t1 = emscripten_get_now();
+					prof_system_ms += (sys_t1 - sys_t0);
 
 				} catch (const SH4ThrownException& ex) {
 					Do_Exception(ex.epc, ex.expEvn);
@@ -1589,9 +1636,111 @@ public:
 		sh4ctx->CpuRunning = false;
 
 #ifdef __EMSCRIPTEN__
-		EM_ASM({ console.log('[rec_wasm] Exited mainloop #' + $0 + ' cache=' + $1 +
-			' blocks=' + $2 + ' interp=' + $3 + ' ts=' + $4); },
-			mainloop_count, wasm_cache_size(), blockExecs, interpExecs, timeslices);
+		// Profiling dump at mainloop exit
+		{
+			double ml_elapsed = emscripten_get_now() - ml_start;
+			double compile_ms = wasm_prof_compile_ms();
+			double exec_sample_ms = wasm_prof_exec_sample_ms();
+			int exec_samples = wasm_prof_exec_samples();
+			int exec_count = wasm_prof_exec_count();
+			u32 fb_calls = g_shil_fb_call_count - fb_count_start;
+
+			// Estimated total execution time from samples
+			double avg_exec_us = exec_samples > 0 ? (exec_sample_ms * 1000.0 / exec_samples) : 0;
+			double est_exec_ms = avg_exec_us * exec_count / 1000.0;
+
+			// Other time = total - emulation - system
+			double other_ms = ml_elapsed - prof_emulation_ms - prof_system_ms;
+
+			EM_ASM({
+				var total = $0;
+				var emu = $1;
+				var sys = $2;
+				var compile = $3;
+				var other = $4;
+				var blks = $5;
+				var ts = $6;
+				var fbCalls = $7;
+				var nativeOps = $8;
+				var fbOps = $9;
+				var execCount = $10;
+				var avgExecUs = $11;
+				var estExecMs = $12;
+				var execSamples = $13;
+
+				var pct = function(v) { return total > 0 ? (v / total * 100).toFixed(1) : '?'; };
+				console.log('');
+				console.log('=== PROFILING REPORT (mainloop #' + $14 + ') ===');
+				console.log('Total wall time:  ' + total.toFixed(0) + ' ms');
+				console.log('');
+				console.log('--- Time Breakdown ---');
+				console.log('Emulation (dispatch+exec+fb): ' + emu.toFixed(0) + ' ms (' + pct(emu) + '%)');
+				console.log('  Est. WASM execution:        ' + estExecMs.toFixed(0) + ' ms (avg ' + avgExecUs.toFixed(2) + ' us/block, ' + execSamples + ' samples)');
+				console.log('  Est. dispatch+fb overhead:  ' + (emu - estExecMs).toFixed(0) + ' ms');
+				console.log('System (render/INTC):         ' + sys.toFixed(0) + ' ms (' + pct(sys) + '%)');
+				console.log('Compilation:                  ' + compile.toFixed(1) + ' ms (' + pct(compile) + '%)');
+				console.log('Other (JS overhead):          ' + other.toFixed(0) + ' ms (' + pct(other) + '%)');
+				console.log('');
+				console.log('--- Block Stats ---');
+				console.log('Blocks executed:  ' + blks.toLocaleString());
+				console.log('Timeslices:       ' + ts.toLocaleString());
+				console.log('Blocks/timeslice: ' + (blks / ts).toFixed(1));
+				console.log('Blocks/ms:        ' + (blks / total).toFixed(1));
+				console.log('');
+				console.log('--- Op Coverage (compile-time) ---');
+				console.log('Native WASM ops:  ' + nativeOps.toLocaleString());
+				console.log('Fallback C++ ops: ' + fbOps.toLocaleString());
+				console.log('Native ratio:     ' + (nativeOps / (nativeOps + fbOps) * 100).toFixed(1) + '%');
+				console.log('');
+				console.log('--- Runtime Fallback Calls ---');
+				console.log('Total FB calls:   ' + fbCalls.toLocaleString());
+				console.log('FB calls/block:   ' + (fbCalls / blks).toFixed(2));
+				console.log('=== END PROFILING ===');
+				console.log('');
+			},
+				ml_elapsed,          // $0 total
+				prof_emulation_ms,   // $1 emu
+				prof_system_ms,      // $2 sys
+				compile_ms,          // $3 compile
+				other_ms,            // $4 other
+				blockExecs,          // $5 blks
+				timeslices,          // $6 ts
+				fb_calls,            // $7 fbCalls
+				prof_native_ops_compiled,   // $8 nativeOps
+				prof_fallback_ops_compiled, // $9 fbOps
+				exec_count,          // $10 execCount
+				avg_exec_us,         // $11 avgExecUs
+				est_exec_ms,         // $12 estExecMs
+				exec_samples,        // $13 execSamples
+				mainloop_count       // $14 mainloop#
+			);
+
+			// Dump top fallback ops by frequency
+			struct FbEntry { int op; u32 count; };
+			FbEntry top[10] = {};
+			for (int i = 0; i < 128; i++) {
+				if (prof_fb_by_op[i] > 0) {
+					// Insert into sorted top-10
+					for (int j = 0; j < 10; j++) {
+						if (prof_fb_by_op[i] > top[j].count) {
+							for (int k = 9; k > j; k--) top[k] = top[k-1];
+							top[j] = { i, prof_fb_by_op[i] };
+							break;
+						}
+					}
+				}
+			}
+			EM_ASM({ console.log('--- Top Fallback Ops (runtime) ---'); });
+			for (int j = 0; j < 10 && top[j].count > 0; j++) {
+				EM_ASM({ console.log('  shop_' + $0 + ': ' + $1.toLocaleString() + ' calls'); },
+					top[j].op, top[j].count);
+			}
+
+			// Reset profiling for next mainloop
+			prof_emulation_ms = 0;
+			prof_system_ms = 0;
+			memset(prof_fb_by_op, 0, sizeof(prof_fb_by_op));
+		}
 #endif
 	}
 
