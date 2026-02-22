@@ -695,6 +695,12 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 // Forward declaration — defined later but needed by ref_execute_block
 extern u32 g_wasm_block_count;
 
+// EXECUTOR_MODE must be defined BEFORE ref_execute_block so that
+// #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
+// Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
+// which made per-instruction cycle charging always active in ref_execute_block.
+#define EXECUTOR_MODE 1
+
 // Reference executor: per-instruction via OpPtr
 // Per-instruction cycle counting (1 per instruction executed)
 // Does NOT follow branches within blocks — exits at first branch
@@ -718,10 +724,8 @@ static void ref_execute_block(RuntimeBlockInfo* block) {
 		}
 		actual_iters++;
 		OpPtr[op](&ctx, op);
-		// NOTE: EXECUTOR_MODE is not yet defined here (#define is below),
-		// so #if EXECUTOR_MODE == 0 evaluates to TRUE (undefined = 0).
-		// This charges 1 cycle per instruction in ALL modes that use
-		// ref_execute_block. The SHIL executor must match this behavior.
+		// Per-instruction cycle charging — only active in mode 0 (pure ref).
+		// EXECUTOR_MODE is defined above this function.
 #if EXECUTOR_MODE == 0
 		ctx.cycle_counter -= 1;
 #endif
@@ -768,15 +772,12 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 	}
 }
 
-// === MODE SWITCH ===
+// === MODE SWITCH (defined above ref_execute_block) ===
 // 0 = ref (per-instruction charging)
-// 1 = SHIL (guest_cycles upfront)
-// 2 = ref + guest_opcodes upfront (known PASS)
-// 3 = hybrid (ref early, SHIL late)
-// 4 = ref execution + SHIL-style charging (isolates timing vs computation)
-// 5 = shadow comparison: ref first, then SHIL, compare registers
-// 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 1
+// 1 = SHIL with guest_offs-based per-instruction charging
+// 4 = ref execution + SHIL-style charging
+// 5 = shadow comparison
+// 6 = pure WASM execution
 
 static u32 pc_hash = 0;
 u32 g_wasm_block_count = 0;  // global so pvr_regs.cpp can reference it
@@ -1056,30 +1057,29 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 	}
 #else
-	// SHIL executor with per-instruction cycle charging.
-	// ref_execute_block (mode 4) has `ctx.cycle_counter -= 1` after each
-	// OpPtr call because `#define EXECUTOR_MODE` is defined AFTER the function,
-	// so `#if EXECUTOR_MODE == 0` evaluates to TRUE (undefined macro = 0).
-	// This per-instruction charging makes cycle_counter evolve during block
-	// execution, which is visible to lazily-computed timer registers (TCNT0 etc.)
-	// via now() = sh4_sched_now64() + SH4_TIMESLICE - cycle_counter.
-	// Without matching charges here, timer reads return values off by 1-2 ticks,
-	// cascading into the BIOS taking a different code path.
+	// SHIL executor with guest_offs-based per-instruction cycle charging.
+	// Root cause: timer reads (TMU TCNT0) depend on cycle_counter via now().
+	// ref_execute_block charges 1 cycle per SH4 instruction (ctx.cycle_counter -= 1
+	// after each OpPtr call). Without this, SHIL ops see a stale cycle_counter,
+	// causing timer values to differ by the instruction index — cascading into
+	// control flow divergence (BIOS never enables framebuffer).
+	// Fix: use guest_offs (byte offset of the SH4 instruction that generated
+	// each SHIL op) to set cycle_counter = base - instruction_index before
+	// each op, matching ref_execute_block's per-instruction pattern exactly.
 	{
 		int cc_pre = ctx.cycle_counter;
-		ctx.cycle_counter -= block->guest_cycles;
+		int cc_base = cc_pre - (int)block->guest_cycles;
+		ctx.cycle_counter = cc_base;
 		g_ifb_exception_pending = false;
-		int per_instr_charged = 0;
-		int max_charges = (int)block->guest_opcodes;
 		for (u32 i = 0; i < block->oplist.size(); i++) {
+			// Set cycle_counter to match ref_execute_block at this instruction.
+			// In ref, instruction N executes with cc = cc_base - N.
+			// guest_offs is the byte offset from block start (2 bytes per SH4 instr).
+			u32 instr_idx = block->oplist[i].guest_offs / 2;
+			ctx.cycle_counter = cc_base - (int)instr_idx;
 			wasm_exec_shil_fb(block->vaddr, i);
-			// Charge 1 cycle per instruction, matching ref_execute_block
-			if (per_instr_charged < max_charges) {
-				ctx.cycle_counter -= 1;
-				per_instr_charged++;
-			}
 		}
-		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
+		ctx.cycle_counter = cc_base;
 		applyBlockExitCpp(block);
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
