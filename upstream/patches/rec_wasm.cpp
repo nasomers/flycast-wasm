@@ -777,7 +777,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 4
+#define EXECUTOR_MODE 1
 
 static u32 pc_hash = 0;
 u32 g_wasm_block_count = 0;  // global so pvr_regs.cpp can reference it
@@ -1199,11 +1199,42 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	state_hash3 = state_hash3 * 1000003u + sh3;
 
 #ifdef __EMSCRIPTEN__
-	// Zoom: 100-block intervals in 3.217M-3.218M, 1K in 3.21M-3.22M, 500K elsewhere
-	bool should_log = (g_wasm_block_count % 500000 == 0) ||
-		(g_wasm_block_count >= 3210000 && g_wasm_block_count <= 3220000 && g_wasm_block_count % 1000 == 0) ||
-		(g_wasm_block_count >= 3217000 && g_wasm_block_count <= 3218000 && g_wasm_block_count % 100 == 0);
-	if (should_log) {
+	// Per-block dump in 3217900-3218000, summary elsewhere
+	bool should_log = (g_wasm_block_count % 500000 == 0);
+	bool should_dump = (g_wasm_block_count >= 3217900 && g_wasm_block_count <= 3218000);
+	if (should_dump) {
+		EM_ASM({ console.log('[DUMP] blk=' + $0 +
+			' pc=0x' + ($1>>>0).toString(16) +
+			' r0=0x' + ($2>>>0).toString(16) +
+			' r1=0x' + ($3>>>0).toString(16) +
+			' r2=0x' + ($4>>>0).toString(16) +
+			' r3=0x' + ($5>>>0).toString(16) +
+			' r4=0x' + ($6>>>0).toString(16) +
+			' r5=0x' + ($7>>>0).toString(16) +
+			' r6=0x' + ($8>>>0).toString(16) +
+			' r7=0x' + ($9>>>0).toString(16) +
+			' T=' + $10); },
+			g_wasm_block_count, ctx.pc,
+			ctx.r[0], ctx.r[1], ctx.r[2], ctx.r[3],
+			ctx.r[4], ctx.r[5], ctx.r[6], ctx.r[7],
+			ctx.sr.T);
+		EM_ASM({ console.log('[DUMP2] blk=' + $0 +
+			' r8=0x' + ($1>>>0).toString(16) +
+			' r9=0x' + ($2>>>0).toString(16) +
+			' r10=0x' + ($3>>>0).toString(16) +
+			' r11=0x' + ($4>>>0).toString(16) +
+			' r12=0x' + ($5>>>0).toString(16) +
+			' r13=0x' + ($6>>>0).toString(16) +
+			' r14=0x' + ($7>>>0).toString(16) +
+			' r15=0x' + ($8>>>0).toString(16) +
+			' pr=0x' + ($9>>>0).toString(16) +
+			' macl=0x' + ($10>>>0).toString(16)); },
+			g_wasm_block_count,
+			ctx.r[8], ctx.r[9], ctx.r[10], ctx.r[11],
+			ctx.r[12], ctx.r[13], ctx.r[14], ctx.r[15],
+			ctx.pr, ctx.mac.l);
+	}
+	if (should_log || should_dump) {
 		EM_ASM({ console.log('[TRACE] blk=' + $0 +
 			' pc=0x' + ($1>>>0).toString(16) +
 			' hPC=0x' + ($2>>>0).toString(16) +
