@@ -702,8 +702,13 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 	}
 }
 
-// === MODE SWITCH: 0=ref (per-instruction), 1=SHIL, 2=ref+guest_opcodes upfront, 3=hybrid ===
-#define EXECUTOR_MODE 1
+// === MODE SWITCH ===
+// 0 = ref (per-instruction charging)
+// 1 = SHIL (guest_cycles upfront)
+// 2 = ref + guest_opcodes upfront (known PASS)
+// 3 = hybrid (ref early, SHIL late)
+// 4 = ref execution + SHIL-style charging (isolates timing vs computation)
+#define EXECUTOR_MODE 4
 
 static u32 pc_hash = 0;
 static u32 block_count = 0;
@@ -773,11 +778,21 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 #endif
 	}
+#elif EXECUTOR_MODE == 4
+	// REF execution with SHIL-style cycle charging.
+	// Uses ref_execute_block for computation (known correct) but charges
+	// guest_cycles upfront and suppresses OpPtr's cycle leak.
+	// If this is FAIL_BLACK: the issue is purely timing (not enough cycles charged).
+	// If this is PASS: the issue is in SHIL computation, not timing.
+	{
+		int cc_pre = ctx.cycle_counter;
+		ctx.cycle_counter -= block->guest_cycles;
+		ref_execute_block(block);
+		// Suppress OpPtr leak: force cycle_counter to pre - guest_cycles
+		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
+	}
 #else
-	// Pure SHIL executor — charge guest_cycles BEFORE ops (like x64 JIT).
-	// Previous approach charged AFTER ops, which meant hardware register reads
-	// (TMU timers, PVR status) during block execution saw stale cycle_counter.
-	// The x64 JIT charges guest_cycles upfront at block start.
+	// Pure SHIL executor - charge guest_cycles BEFORE ops (like x64 JIT).
 	{
 		ctx.cycle_counter -= block->guest_cycles;
 		g_ifb_exception_pending = false;
