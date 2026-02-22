@@ -176,6 +176,9 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_ifb(u32 opcode, u32 pc) {
 	OpPtr[opcode](&Sh4cntx, opcode);
 }
 
+// Forward declaration needed for per-op tracing diagnostic
+extern u32 g_wasm_block_count;
+
 // Runtime SHIL op interpreter — executes a single SHIL op by reading
 // register values from Sh4Context, performing the operation, and writing
 // results back. Used for ops that the WASM emitter doesn't handle natively.
@@ -222,6 +225,20 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 	auto writeF32 = [&](const shil_param& p, float val) {
 		if (p.is_reg()) *(float*)((u8*)&ctx + p.reg_offset()) = val;
 	};
+
+	// Per-op trace for diverging block #2360476 at pc=0x8c00b8e4
+#ifdef __EMSCRIPTEN__
+	bool trace_this = (g_wasm_block_count == 2360476 && block_vaddr == 0x8c00b8e4);
+	u32 r0_before = ctx.r[0];
+	(void)r0_before;
+	if (trace_this) {
+		// On first op, dump block info
+		if (op_index == 0) {
+			EM_ASM({ console.log('[OP-TRACE] === Block #2360476 pc=0x8c00b8e4 nops=' + $0); },
+				(u32)block->oplist.size());
+		}
+	}
+#endif
 
 	switch (op.op) {
 	case shop_sync_sr:
@@ -681,6 +698,29 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 #endif
 		break;
 	}
+
+#ifdef __EMSCRIPTEN__
+	if (trace_this) {
+		u32 r0_after = ctx.r[0];
+		// Log: op index, op type, r0 before/after
+		// Also log rd target offset and rs1 details for reads
+		u32 rd_off = op.rd.is_reg() ? op.rd.reg_offset() : 0xFFFF;
+		u32 rs1_val = op.rs1.is_reg() ? *(u32*)((u8*)&ctx + op.rs1.reg_offset()) : (op.rs1.is_imm() ? op.rs1._imm : 0);
+		bool r0_changed = (r0_before != r0_after);
+		EM_ASM({ console.log('[OP-TRACE] i=' + $0 +
+			' op=' + $1 +
+			' sz=' + $2 +
+			' r0=' + ($3 ? 'CHANGED' : 'same') +
+			' r0_b=0x' + ($4>>>0).toString(16) +
+			' r0_a=0x' + ($5>>>0).toString(16) +
+			' rd_off=0x' + ($6>>>0).toString(16) +
+			' rs1_val=0x' + ($7>>>0).toString(16)); },
+			op_index, (int)op.op, (int)op.size,
+			r0_changed ? 1 : 0,
+			r0_before, r0_after,
+			rd_off, rs1_val);
+	}
+#endif
 }
 
 } // extern "C"
@@ -698,7 +738,7 @@ extern u32 g_wasm_block_count;
 // #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
 // Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
 // which made per-instruction cycle charging always active in ref_execute_block.
-#define EXECUTOR_MODE 4
+#define EXECUTOR_MODE 1
 #define SHIL_START_BLOCK 2360000
 
 // Reference executor: per-instruction via OpPtr
@@ -1648,6 +1688,35 @@ public:
 				' pc=0x' + ($2>>>0).toString(16) + ' ops=' + $3); },
 				compiledCount, failCount, block->vaddr,
 				(int)block->oplist.size());
+		}
+		// Dump full oplist for the diverging block at PC 0x8c00b8e4
+		if (block->vaddr == 0x8c00b8e4) {
+			EM_ASM({ console.log('[OPLIST-DUMP] pc=0x8c00b8e4 nops=' + $0 +
+				' guest_cycles=' + $1 + ' guest_opcodes=' + $2 +
+				' bt=' + $3 + ' sh4_size=' + $4); },
+				(u32)block->oplist.size(), block->guest_cycles,
+				block->guest_opcodes, (int)block->BlockType,
+				block->sh4_code_size);
+			for (u32 i = 0; i < block->oplist.size(); i++) {
+				shil_opcode& sop = block->oplist[i];
+				u32 rd_off = sop.rd.is_reg() ? sop.rd.reg_offset() : 0xFFFF;
+				u32 rs1_info = sop.rs1.is_reg() ? sop.rs1.reg_offset() :
+				               (sop.rs1.is_imm() ? sop.rs1._imm : 0xDEAD);
+				u32 rs2_info = sop.rs2.is_reg() ? sop.rs2.reg_offset() :
+				               (sop.rs2.is_imm() ? sop.rs2._imm : 0xDEAD);
+				u32 rs3_info = sop.rs3.is_reg() ? sop.rs3.reg_offset() :
+				               (sop.rs3.is_imm() ? sop.rs3._imm : 0xDEAD);
+				EM_ASM({ console.log('[OPLIST] i=' + $0 +
+					' op=' + $1 + ' sz=' + $2 +
+					' rd=0x' + ($3>>>0).toString(16) +
+					' rs1=0x' + ($4>>>0).toString(16) +
+					' rs2=0x' + ($5>>>0).toString(16) +
+					' rs3=0x' + ($6>>>0).toString(16) +
+					' rs1_reg=' + $7 + ' rs1_imm=' + $8); },
+					i, (int)sop.op, (int)sop.size,
+					rd_off, rs1_info, rs2_info, rs3_info,
+					sop.rs1.is_reg() ? 1 : 0, sop.rs1.is_imm() ? 1 : 0);
+			}
 		}
 #endif
 	}
