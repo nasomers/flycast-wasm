@@ -94,9 +94,6 @@ static inline void emitStoreRdF32(WasmModuleBuilder& b, const shil_param& rd) {
 // ============================================================
 static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
                         RuntimeBlockInfo* block, u32 opIndex) {
-	// DIAGNOSTIC: Force ALL ops through SHIL_FB to test WASM infrastructure
-	// (cycle counting + block exit). If still FAIL_BLACK, bug is in infrastructure.
-	return false;
 	switch (op.op) {
 
 	// ---- Tier 1: Integer ALU ----
