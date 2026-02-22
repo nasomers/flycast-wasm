@@ -738,7 +738,7 @@ extern u32 g_wasm_block_count;
 // #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
 // Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
 // which made per-instruction cycle charging always active in ref_execute_block.
-#define EXECUTOR_MODE 1
+#define EXECUTOR_MODE 4
 #define SHIL_START_BLOCK 2360000
 
 // Reference executor: per-instruction via OpPtr
@@ -1444,9 +1444,9 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		// Hash ALL r[0..15] to find ANY register divergence
 		u32 rh = 0;
 		for (int i = 0; i < 16; i++) rh = rh * 31u + ctx.r[i];
-		// Read the value at the diverging stack address 0x8cffffdc
-		// (physical 0x0cffffdc, in main RAM)
-		u32 stack_val = ReadMem32(0x8cffffdc);
+		// Read the value at the ACTUAL r0 pop address for the diverging block
+		// BLK-DETAIL #2360476: r15_end=0x8cffffc0, r0 popped from r15_end - 8
+		u32 stack_val = ReadMem32(0x8cffffb8);
 		EM_ASM({ console.log('[BLK-DETAIL] #' + $0 +
 			' pc=0x' + ($1>>>0).toString(16) +
 			' cc=' + ($2|0) +
