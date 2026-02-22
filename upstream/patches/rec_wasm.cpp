@@ -692,6 +692,9 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 // Follows PC after each instruction to handle branches properly
 // (branch handlers execute delay slot internally via executeDelaySlot).
 // ============================================================
+// Forward declaration — defined later but needed by ref_execute_block
+extern u32 g_wasm_block_count;
+
 // Reference executor: per-instruction via OpPtr
 // Per-instruction cycle counting (1 per instruction executed)
 // Does NOT follow branches within blocks — exits at first branch
@@ -718,6 +721,19 @@ static void ref_execute_block(RuntimeBlockInfo* block) {
 		actual_iters++;
 		// Always execute instructions — OpPtr handles branches, memory, registers
 		OpPtr[op](&ctx, op);
+#ifdef __EMSCRIPTEN__
+		// Per-instruction logging for divergence block range
+		if (g_wasm_block_count >= 2360460 && g_wasm_block_count <= 2360470) {
+			EM_ASM({ console.log('[REFI] blk=' + $0 + ' n=' + $1 +
+				' pc=0x' + ($2>>>0).toString(16) +
+				' op=0x' + ($3>>>0).toString(16) +
+				' r0=0x' + ($4>>>0).toString(16) +
+				' r1=0x' + ($5>>>0).toString(16) +
+				' cc=' + ($6|0)); },
+				g_wasm_block_count, n, pc, (u32)op,
+				ctx.r[0], ctx.r[1], ctx.cycle_counter);
+		}
+#endif
 #if EXECUTOR_MODE == 0
 		ctx.cycle_counter -= 1;
 #endif
@@ -772,7 +788,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 1
+#define EXECUTOR_MODE 5
 
 static u32 pc_hash = 0;
 u32 g_wasm_block_count = 0;  // global so pvr_regs.cpp can reference it
@@ -890,8 +906,48 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		// --- Run SHIL ---
 		ctx.cycle_counter -= block->guest_cycles;
 		g_ifb_exception_pending = false;
+#ifdef __EMSCRIPTEN__
+		{
+			bool detailed = (g_wasm_block_count >= 2360460 && g_wasm_block_count <= 2360470);
+			for (u32 i = 0; i < block->oplist.size(); i++) {
+				u32 addr_for_log = 0;
+				if (detailed) {
+					auto& sop = block->oplist[i];
+					// Capture address BEFORE the op (in case rd overwrites rs1)
+					if (sop.op == shop_readm || sop.op == shop_writem) {
+						if (sop.rs1.is_reg())
+							addr_for_log = *(u32*)((u8*)&ctx + sop.rs1.reg_offset());
+						else if (sop.rs1.is_imm())
+							addr_for_log = sop.rs1._imm;
+						if (!sop.rs3.is_null()) {
+							if (sop.rs3.is_reg())
+								addr_for_log += *(u32*)((u8*)&ctx + sop.rs3.reg_offset());
+							else if (sop.rs3.is_imm())
+								addr_for_log += sop.rs3._imm;
+						}
+					}
+				}
+				wasm_exec_shil_fb(block->vaddr, i);
+				if (detailed) {
+					auto& sop = block->oplist[i];
+					EM_ASM({ console.log('[SHILOP] blk=' + $0 +
+						' op=' + $1 + ' shop=' + $2 +
+						' r0=0x' + ($3>>>0).toString(16) +
+						' r1=0x' + ($4>>>0).toString(16) +
+						' addr=0x' + ($5>>>0).toString(16) +
+						' size=' + $6 +
+						' rd_off=0x' + ($7>>>0).toString(16) +
+						' ref_r0=0x' + ($8>>>0).toString(16)); },
+						g_wasm_block_count, i, (int)sop.op,
+						ctx.r[0], ctx.r[1], addr_for_log, sop.size,
+						sop.rd.reg_offset(), ref_result.r[0]);
+				}
+			}
+		}
+#else
 		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
+#endif
 		applyBlockExitCpp(block);
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
