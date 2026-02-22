@@ -36,7 +36,7 @@ echo "Linking..."
 
 # Link: stubs FIRST, then RetroArch objects, then Flycast archives
 # (link order matters — stubs provide fill_short_pathname_representation)
-emcc -O2 -g2 \
+emcc -O3 -flto \
   -s WASM=1 \
   -s WASM_BIGINT \
   -s MODULARIZE=1 \
@@ -50,7 +50,7 @@ emcc -O2 -g2 \
   -s EXIT_RUNTIME=0 \
   -s FORCE_FILESYSTEM=1 \
   -s WARN_ON_UNDEFINED_SYMBOLS=0 \
-  -s ASSERTIONS=2 \
+  -s ASSERTIONS=0 \
   -s DISABLE_EXCEPTION_CATCHING=0 \
   -fexceptions \
   -Wl,--wrap=glGetString -Wl,--allow-undefined \

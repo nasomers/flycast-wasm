@@ -1316,7 +1316,7 @@ EM_JS(int, wasm_compile_block, (const u8* bytesPtr, u32 len, u32 block_pc), {
 		var mod = new WebAssembly.Module(wasmBytes);
 		var instance = new WebAssembly.Instance(mod, {
 			env: {
-				memory: wasmExports.memory,
+				memory: wasmMemory,
 				read8:   function(addr) { return Module._wasm_mem_read8(addr); },
 				read16:  function(addr) { return Module._wasm_mem_read16(addr); },
 				read32:  function(addr) { return Module._wasm_mem_read32(addr); },
