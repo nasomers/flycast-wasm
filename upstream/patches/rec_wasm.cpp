@@ -2139,7 +2139,6 @@ public:
 				console.log('Blocks/timeslice: ' + (blks / ts).toFixed(1));
 				console.log('Blocks/ms:        ' + (blks / total).toFixed(1));
 				console.log('Idle loops:       ' + $15);
-				console.log('Multi-blocks:     ' + $16 + ' modules (' + $17 + ' blocks)');
 				console.log('');
 				console.log('--- Op Coverage (compile-time) ---');
 				console.log('Native WASM ops:  ' + nativeOps.toLocaleString());
@@ -2167,10 +2166,12 @@ public:
 				est_exec_ms,         // $12 estExecMs
 				exec_samples,        // $13 execSamples
 				mainloop_count,      // $14 mainloop#
-				prof_idle_loops_detected,  // $15 idle loops
-				prof_multiblock_modules,   // $16 multi-block modules
-				prof_multiblock_total_blocks  // $17 total blocks in multi-block
+				prof_idle_loops_detected  // $15 idle loops
 			);
+
+			// Multi-block stats (separate EM_ASM to avoid 16-arg limit)
+			EM_ASM({ console.log('Multi-blocks:     ' + $0 + ' modules (' + $1 + ' blocks)'); },
+				prof_multiblock_modules, prof_multiblock_total_blocks);
 
 			// Dump top fallback ops by frequency
 			struct FbEntry { int op; u32 count; };
