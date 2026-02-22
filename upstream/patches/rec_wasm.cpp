@@ -113,6 +113,8 @@ static u32 g_shil_sq_write_count = 0;
 static u32 prof_native_ops_compiled = 0;   // SHIL ops compiled to native WASM
 static u32 prof_fallback_ops_compiled = 0; // SHIL ops compiled as C++ fallback
 static u32 prof_idle_loops_detected = 0;   // blocks detected as idle spin-wait loops
+static u32 prof_multiblock_modules = 0;   // multi-block super-block modules compiled
+static u32 prof_multiblock_total_blocks = 0; // total blocks in super-block modules
 static u32 prof_fb_by_op[128] = {};        // runtime fallback calls by op type
 static double prof_emulation_ms = 0;       // time in inner block dispatch loop
 static double prof_system_ms = 0;          // time in UpdateSystem_INTC
@@ -1618,6 +1620,280 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 }
 
 // ============================================================
+// Multi-block module: chain connected blocks into one WASM module
+// ============================================================
+
+static constexpr int MULTIBLOCK_MAX = 4;
+
+// Flush ALL cached entries to ctx memory unconditionally (ignores dirty flag).
+// Used at multi-block exit points where compile-time dirty tracking is unreliable.
+static void emitFlushAllUnconditional(WasmModuleBuilder& b, const RegCache& cache) {
+	for (auto& [offset, entry] : cache.entries) {
+		b.op_local_get(LOCAL_CTX);
+		b.op_local_get(entry.wasmLocal);
+		b.op_i32_store(offset);
+	}
+}
+
+// Discover a chain of statically-connected blocks for multi-block compilation.
+// Only follows unconditional static jumps to already-compiled blocks.
+static std::vector<RuntimeBlockInfo*> discoverChain(RuntimeBlockInfo* entry) {
+	std::vector<RuntimeBlockInfo*> chain;
+	chain.push_back(entry);
+
+	RuntimeBlockInfo* current = entry;
+	while ((int)chain.size() < MULTIBLOCK_MAX) {
+		u32 bcls = BET_GET_CLS(current->BlockType);
+		if (bcls != BET_CLS_Static || current->BlockType == BET_StaticIntr)
+			break;
+
+		u32 nextPC = current->BranchBlock;
+		if (nextPC == 0xFFFFFFFF) break;
+		if (nextPC == current->vaddr) break;  // self-loop handled by idle detection
+
+		auto it = blockByVaddr.find(nextPC);
+		if (it == blockByVaddr.end()) break;
+
+		RuntimeBlockInfo* next = it->second;
+
+		// Avoid duplicates (loop in chain)
+		bool dup = false;
+		for (auto* b : chain) {
+			if (b->vaddr == next->vaddr) { dup = true; break; }
+		}
+		if (dup) break;
+
+		chain.push_back(next);
+		current = next;
+	}
+	return chain;
+}
+
+// Build a multi-block WASM module with internal dispatch loop.
+//
+// WASM nesting (br depths from inside a block's if body):
+//   block $exit {            // br(2) = exit
+//     loop $dispatch {       // br(1) = re-dispatch (loop back)
+//       if (idx == i) {      // br(0) = fall through to next if
+//         ...
+//       }
+//     }
+//   }
+//   <final flush runs here after any br $exit>
+//
+// Register cache: shared across all blocks. Compile-time dirty tracking is
+// unreliable across multiple blocks, so we use emitFlushAllUnconditional at
+// all exit points. Within a single block's SHIL ops, emitFlushAll/emitReloadAll
+// for ifb/shil_fb fallbacks works correctly.
+static bool buildMultiBlockModule(WasmModuleBuilder& b,
+                                   const std::vector<RuntimeBlockInfo*>& chain) {
+	// Unified register cache across all blocks
+	RegCache cache;
+	for (auto* blk : chain) {
+		cache.scanBlock(blk);
+	}
+
+	// PC → chain index map
+	std::unordered_map<u32, u32> pcToIdx;
+	for (u32 i = 0; i < chain.size(); i++) {
+		pcToIdx[chain[i]->vaddr] = i;
+	}
+
+	// Extra local for dispatch index
+	u32 LOCAL_NEXT_IDX = 3 + cache.localCount();
+
+	b.emitHeader();
+
+	// Type section: same 3 types
+	b.emitTypeSection(3);
+	{
+		u8 p0[] = { WASM_TYPE_I32, WASM_TYPE_I32 };
+		b.emitFuncType(p0, 2, nullptr, 0);
+		u8 p1[] = { WASM_TYPE_I32 };
+		u8 r1[] = { WASM_TYPE_I32 };
+		b.emitFuncType(p1, 1, r1, 1);
+		u8 p2[] = { WASM_TYPE_I32, WASM_TYPE_I32 };
+		b.emitFuncType(p2, 2, nullptr, 0);
+	}
+	b.endSection();
+
+	// Import section
+	b.emitImportSection(9);
+	b.emitImportMemory("env", "memory", 0);
+	b.emitImportFunc("env", "read8",   1);
+	b.emitImportFunc("env", "read16",  1);
+	b.emitImportFunc("env", "read32",  1);
+	b.emitImportFunc("env", "write8",  2);
+	b.emitImportFunc("env", "write16", 2);
+	b.emitImportFunc("env", "write32", 2);
+	b.emitImportFunc("env", "ifb",     2);
+	b.emitImportFunc("env", "shil_fb", 2);
+	b.endSection();
+
+	u32 typeIdx = 0;
+	b.emitFunctionSection(1, &typeIdx);
+	b.emitExportSection("b", WIMPORT_COUNT);
+
+	b.beginCodeSection(1);
+	b.beginFuncBody();
+
+	// Locals: 1 temp + N cached regs + 1 dispatch index
+	u32 totalExtraLocals = 1 + cache.localCount() + 1;
+	u32 lc = totalExtraLocals;
+	u8 lt = WASM_TYPE_I32;
+	b.emitLocals(1, &lc, &lt);
+
+	// Prologue: load all cached registers
+	for (auto& [offset, entry] : cache.entries) {
+		b.op_local_get(LOCAL_CTX);
+		b.op_i32_load(offset);
+		b.op_local_set(entry.wasmLocal);
+	}
+
+	// Initialize dispatch index = 0 (entry block)
+	b.op_i32_const(0);
+	b.op_local_set(LOCAL_NEXT_IDX);
+
+	b.op_block();  // $exit — br(2) from if body, br(1) from loop body
+	b.op_loop();   // $dispatch — br(1) from if body, br(0) from loop body
+
+	// --- Cycle counter check ---
+	b.op_local_get(LOCAL_CTX);
+	b.op_i32_load(ctx_off::CYCLE_COUNTER);
+	b.op_i32_const(0);
+	b.op_i32_le_s();
+	b.op_br_if(1);  // br $exit (from loop body: depth 1)
+
+	// --- Interrupt check ---
+	b.op_local_get(LOCAL_CTX);
+	b.op_i32_load(0x16C);
+	b.op_br_if(1);  // br $exit
+
+	// --- Dispatch each block ---
+	for (u32 i = 0; i < chain.size(); i++) {
+		RuntimeBlockInfo* blk = chain[i];
+
+		b.op_local_get(LOCAL_NEXT_IDX);
+		b.op_i32_const((s32)i);
+		b.op_i32_eq();
+		b.op_if();  // if body: $exit=br(2), $dispatch=br(1), this if=br(0)
+
+		// Mark all entries dirty before this block (conservative: ensures
+		// correct flushing regardless of which previous block executed)
+		for (auto& [offset, entry] : cache.entries)
+			entry.dirty = true;
+
+		// Decrement cycle_counter
+		b.op_local_get(LOCAL_CTX);
+		b.op_local_get(LOCAL_CTX);
+		b.op_i32_load(ctx_off::CYCLE_COUNTER);
+		b.op_i32_const((s32)blk->guest_cycles);
+		b.op_i32_sub();
+		b.op_i32_store(ctx_off::CYCLE_COUNTER);
+
+		// Emit SHIL ops (shared cache, ifb/shil_fb uses flush+reload)
+		for (u32 j = 0; j < blk->oplist.size(); j++) {
+			shil_opcode& op = blk->oplist[j];
+			if (!emitShilOp(b, op, blk, j, cache)) {
+				prof_fallback_ops_compiled++;
+				emitFlushAll(b, cache);
+				b.op_i32_const((s32)blk->vaddr);
+				b.op_i32_const((s32)j);
+				b.op_call(WIMPORT_SHIL_FB);
+				emitReloadAll(b, cache);
+			} else {
+				prof_native_ops_compiled++;
+			}
+		}
+
+		// Block exit: writes next PC to ctx memory
+		emitBlockExit(b, blk, cache);
+
+		// Route to next block or exit
+		u32 bcls_blk = BET_GET_CLS(blk->BlockType);
+
+		if (bcls_blk == BET_CLS_Static && blk->BlockType != BET_StaticIntr) {
+			auto target = pcToIdx.find(blk->BranchBlock);
+			if (target != pcToIdx.end()) {
+				// Target in chain: set dispatch index, loop back
+				b.op_i32_const((s32)target->second);
+				b.op_local_set(LOCAL_NEXT_IDX);
+				b.op_br(1);  // br $dispatch (from if: depth 1)
+			} else {
+				// Target outside chain: exit
+				b.op_br(2);  // br $exit (from if: depth 2)
+			}
+		} else if (bcls_blk == BET_CLS_COND) {
+			// Conditional: check PC against known targets
+			auto branchTarget = pcToIdx.find(blk->BranchBlock);
+			auto nextTarget = pcToIdx.find(blk->NextBlock);
+
+			if (branchTarget != pcToIdx.end() && nextTarget != pcToIdx.end()) {
+				// Both targets in chain
+				b.op_local_get(LOCAL_CTX);
+				b.op_i32_load(ctx_off::PC);
+				b.op_i32_const((s32)blk->BranchBlock);
+				b.op_i32_eq();
+				b.op_if();  // inner if: $exit=br(3), $dispatch=br(2), outer if=br(1)
+				b.op_i32_const((s32)branchTarget->second);
+				b.op_local_set(LOCAL_NEXT_IDX);
+				b.op_else();
+				b.op_i32_const((s32)nextTarget->second);
+				b.op_local_set(LOCAL_NEXT_IDX);
+				b.op_end();
+				b.op_br(1);  // br $dispatch (from outer if: depth 1)
+			} else if (branchTarget != pcToIdx.end()) {
+				// Only branch target in chain
+				b.op_local_get(LOCAL_CTX);
+				b.op_i32_load(ctx_off::PC);
+				b.op_i32_const((s32)blk->BranchBlock);
+				b.op_i32_eq();
+				b.op_if();  // inner if
+				b.op_i32_const((s32)branchTarget->second);
+				b.op_local_set(LOCAL_NEXT_IDX);
+				b.op_br(2);  // br $dispatch (from inner if: depth 2)
+				b.op_end();
+				b.op_br(2);  // br $exit (from outer if: depth 2)
+			} else if (nextTarget != pcToIdx.end()) {
+				// Only fall-through in chain
+				b.op_local_get(LOCAL_CTX);
+				b.op_i32_load(ctx_off::PC);
+				b.op_i32_const((s32)blk->NextBlock);
+				b.op_i32_eq();
+				b.op_if();  // inner if
+				b.op_i32_const((s32)nextTarget->second);
+				b.op_local_set(LOCAL_NEXT_IDX);
+				b.op_br(2);  // br $dispatch (from inner if: depth 2)
+				b.op_end();
+				b.op_br(2);  // br $exit (from outer if: depth 2)
+			} else {
+				b.op_br(2);  // br $exit
+			}
+		} else {
+			// Dynamic or other: must exit super-block
+			b.op_br(2);  // br $exit
+		}
+
+		b.op_end();  // end if (block index check)
+	}
+
+	// Default: no block matched (shouldn't happen), exit
+	b.op_br(1);  // br $exit (from loop body: depth 1)
+
+	b.op_end();  // end loop $dispatch
+	b.op_end();  // end block $exit
+
+	// Final unconditional flush: runs on ALL exit paths
+	// (cycle check, interrupt, target outside chain, dynamic branch)
+	emitFlushAllUnconditional(b, cache);
+
+	b.endFuncBody();
+	b.endSection();
+
+	return true;
+}
+
+// ============================================================
 // WasmDynarec class
 // ============================================================
 
@@ -1667,7 +1943,16 @@ public:
 #if EXECUTOR_MODE == 6
 		// Only build WASM modules when using WASM execution
 		WasmModuleBuilder builder;
-		buildBlockModule(builder, block);
+
+		// Try multi-block: chain statically-connected blocks
+		auto chain = discoverChain(block);
+		if (chain.size() >= 2) {
+			buildMultiBlockModule(builder, chain);
+			prof_multiblock_modules++;
+			prof_multiblock_total_blocks += (u32)chain.size();
+		} else {
+			buildBlockModule(builder, block);
+		}
 
 		const auto& bytes = builder.getBytes();
 		int result = wasm_compile_block(bytes.data(), (u32)bytes.size(), block->vaddr);
@@ -1854,6 +2139,7 @@ public:
 				console.log('Blocks/timeslice: ' + (blks / ts).toFixed(1));
 				console.log('Blocks/ms:        ' + (blks / total).toFixed(1));
 				console.log('Idle loops:       ' + $15);
+				console.log('Multi-blocks:     ' + $16 + ' modules (' + $17 + ' blocks)');
 				console.log('');
 				console.log('--- Op Coverage (compile-time) ---');
 				console.log('Native WASM ops:  ' + nativeOps.toLocaleString());
@@ -1881,7 +2167,9 @@ public:
 				est_exec_ms,         // $12 estExecMs
 				exec_samples,        // $13 execSamples
 				mainloop_count,      // $14 mainloop#
-				prof_idle_loops_detected  // $15 idle loops
+				prof_idle_loops_detected,  // $15 idle loops
+				prof_multiblock_modules,   // $16 multi-block modules
+				prof_multiblock_total_blocks  // $17 total blocks in multi-block
 			);
 
 			// Dump top fallback ops by frequency
