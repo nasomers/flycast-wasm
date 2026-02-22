@@ -55,7 +55,7 @@ DynarecCodeEntryPtr DYNACALL rdv_FailedToFindBlock(u32 pc);
 #ifdef __EMSCRIPTEN__
 extern "C" {
 int wasm_compile_block(const u8* bytesPtr, u32 len, u32 block_pc);
-int wasm_execute_block(u32 block_pc, u32 ctx_ptr);
+int wasm_execute_block(u32 block_pc, u32 ctx_ptr, u32 ram_base);
 int wasm_has_block(u32 block_pc);
 void wasm_clear_cache();
 void wasm_remove_block(u32 block_pc);
@@ -169,6 +169,17 @@ void EMSCRIPTEN_KEEPALIVE wasm_mem_write16(u32 addr, u32 val) {
 void EMSCRIPTEN_KEEPALIVE wasm_mem_write32(u32 addr, u32 val) {
 	addMemWritePenalty(addr, 4);
 	WriteMem32(addr, val);
+}
+
+// Returns the heap offset of main RAM buffer for direct WASM memory access.
+// On Emscripten, malloc'd pointers ARE linear memory offsets.
+u32 EMSCRIPTEN_KEEPALIVE wasm_get_ram_base() {
+	return (u32)(uintptr_t)&mem_b[0];
+}
+
+u32 EMSCRIPTEN_KEEPALIVE wasm_get_vram_base() {
+	extern RamRegion vram;
+	return (u32)(uintptr_t)&vram[0];
 }
 
 void EMSCRIPTEN_KEEPALIVE wasm_exec_ifb(u32 opcode, u32 pc) {
@@ -1236,7 +1247,8 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	{
 		g_ifb_exception_pending = false;
 		u32 ctx_ptr = (u32)(uintptr_t)&ctx;
-		int trap = wasm_execute_block(block->vaddr, ctx_ptr);
+		u32 ram_ptr = (u32)(uintptr_t)&mem_b[0];
+		int trap = wasm_execute_block(block->vaddr, ctx_ptr, ram_ptr);
 		if (trap) {
 			// WASM trapped — fallback to C++ for this block
 			ctx.cycle_counter -= block->guest_cycles;
@@ -1302,9 +1314,9 @@ EM_JS(int, wasm_compile_block, (const u8* bytesPtr, u32 len, u32 block_pc), {
 	}
 });
 
-EM_JS(int, wasm_execute_block, (u32 block_pc, u32 ctx_ptr), {
+EM_JS(int, wasm_execute_block, (u32 block_pc, u32 ctx_ptr, u32 ram_base), {
 	try {
-		Module._wasmBlockCache[block_pc](ctx_ptr);
+		Module._wasmBlockCache[block_pc](ctx_ptr, ram_base);
 		return 0;
 	} catch (e) {
 		if (!Module._wasmTrapCount) Module._wasmTrapCount = 0;
@@ -1334,7 +1346,7 @@ EM_JS(int, wasm_cache_size, (), {
 
 #else
 static int wasm_compile_block(const u8*, u32, u32) { return 0; }
-static void wasm_execute_block(u32, u32) {}
+static int wasm_execute_block(u32, u32, u32) { return 0; }
 static int wasm_has_block(u32) { return 0; }
 static void wasm_remove_block(u32) {}
 static void wasm_clear_cache() {}
@@ -1349,16 +1361,17 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	b.emitHeader();
 
 	// Type section: 3 function signatures
-	// Type 0: (i32) -> void      — block function
+	// Type 0: (i32, i32) -> void — block function (ctx_ptr, ram_base)
 	// Type 1: (i32) -> i32       — read8/16/32
 	// Type 2: (i32, i32) -> void — write8/16/32, ifb, shil_fb
 	b.emitTypeSection(3);
 	{
-		u8 p0[] = { WASM_TYPE_I32 };
-		b.emitFuncType(p0, 1, nullptr, 0);
+		u8 p0[] = { WASM_TYPE_I32, WASM_TYPE_I32 };
+		b.emitFuncType(p0, 2, nullptr, 0);
 
+		u8 p1[] = { WASM_TYPE_I32 };
 		u8 r1[] = { WASM_TYPE_I32 };
-		b.emitFuncType(p0, 1, r1, 1);
+		b.emitFuncType(p1, 1, r1, 1);
 
 		u8 p2[] = { WASM_TYPE_I32, WASM_TYPE_I32 };
 		b.emitFuncType(p2, 2, nullptr, 0);

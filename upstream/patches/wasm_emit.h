@@ -36,9 +36,11 @@ namespace ctx_off {
 
 // Local variable indices in the compiled WASM function
 // Local 0 = ctx_ptr (function parameter)
-// Local 1 = temp i32 (for intermediate values)
+// Local 1 = ram_base (function parameter — heap offset of Dreamcast main RAM)
+// Local 2 = temp i32 (for intermediate values)
 constexpr u32 LOCAL_CTX = 0;
-constexpr u32 LOCAL_TMP = 1;
+constexpr u32 LOCAL_RAM = 1;
+constexpr u32 LOCAL_TMP = 2;
 
 // ============================================================
 // Helper: load a value from a shil_param onto the WASM stack
@@ -366,27 +368,26 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 	// ---- Memory operations ----
 
 	case shop_readm: {
-		// Compute address: rs1 + rs3 (if rs3 not null)
-		// Store address in LOCAL_TMP for reuse in 64-bit case
+		// Compute address: rs1 + rs3 (if rs3 not null), store in LOCAL_TMP
 		emitLoadParam(b, op.rs1);
 		if (!op.rs3.is_null()) {
 			emitLoadParam(b, op.rs3);
 			b.op_i32_add();
 		}
+		b.op_local_set(LOCAL_TMP);
 
 		if (op.size == 8) {
-			// 64-bit read: two 32-bit reads → rd (low) and rd+4 (high)
-			b.op_local_tee(LOCAL_TMP);
+			// 64-bit read: two 32-bit reads (always use imports for simplicity)
+			b.op_local_get(LOCAL_TMP);
 			b.op_call(WIMPORT_READ32);
-			// Store low word to rd
 			{
 				u32 off = op.rd.reg_offset();
-				b.op_local_set(LOCAL_TMP); // save result
+				b.op_local_set(LOCAL_TMP); // reuse for result
 				b.op_local_get(LOCAL_CTX);
 				b.op_local_get(LOCAL_TMP);
 				b.op_i32_store(off);
 			}
-			// Read high word (addr + 4) — recompute address since LOCAL_TMP was reused
+			// High word: recompute address
 			emitLoadParam(b, op.rs1);
 			if (!op.rs3.is_null()) {
 				emitLoadParam(b, op.rs3);
@@ -403,17 +404,53 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 				b.op_i32_store(off);
 			}
 		} else {
-			u32 readFunc;
-			switch (op.size) {
-			case 1: readFunc = WIMPORT_READ8; break;
-			case 2: readFunc = WIMPORT_READ16; break;
-			default: readFunc = WIMPORT_READ32; break;
-			}
-			b.op_call(readFunc);
+			// 1/2/4-byte read: direct RAM fast path for area 3 (0x0C-0x0F)
+			// Dreamcast RAM is 16MB at physical 0x0C000000, mirrored through 0x0FFFFFFF.
+			// Check: (phys >> 26) == 3  (area 3 = system RAM)
+			// Fast path: i32.load8_s/i32.load16_s/i32.load at ram_base + (phys & 0x00FFFFFF)
+			b.op_local_get(LOCAL_CTX);  // push ctx for final store
 
-			b.op_local_set(LOCAL_TMP);
-			b.op_local_get(LOCAL_CTX);
 			b.op_local_get(LOCAL_TMP);
+			b.op_i32_const(0x1FFFFFFF);
+			b.op_i32_and();             // phys = addr & 0x1FFFFFFF
+			b.op_local_tee(LOCAL_TMP);  // save phys
+
+			b.op_i32_const(26);
+			b.op_i32_shr_u();          // area = phys >> 26
+			b.op_i32_const(3);
+			b.op_i32_eq();             // is_ram = (area == 3)
+
+			b.op_if(WASM_TYPE_I32);    // if (is_ram) → produces i32
+			{
+				b.op_local_get(LOCAL_RAM);
+				b.op_local_get(LOCAL_TMP);
+				b.op_i32_const(0x00FFFFFF);
+				b.op_i32_and();
+				b.op_i32_add();        // heap_addr = ram_base + (phys & 0x00FFFFFF)
+				switch (op.size) {
+				case 1: b.op_i32_load8_s(0); break;   // sign-extend 8→32
+				case 2: b.op_i32_load16_s(0); break;   // sign-extend 16→32
+				default: b.op_i32_load(0); break;       // plain 32-bit
+				}
+			}
+			b.op_else();
+			{
+				// Slow path: recompute original addr, call import
+				emitLoadParam(b, op.rs1);
+				if (!op.rs3.is_null()) {
+					emitLoadParam(b, op.rs3);
+					b.op_i32_add();
+				}
+				u32 readFunc;
+				switch (op.size) {
+				case 1: readFunc = WIMPORT_READ8; break;
+				case 2: readFunc = WIMPORT_READ16; break;
+				default: readFunc = WIMPORT_READ32; break;
+				}
+				b.op_call(readFunc);
+			}
+			b.op_end();
+
 			b.op_i32_store(op.rd.reg_offset());
 		}
 		return true;
@@ -445,20 +482,56 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 			b.op_i32_load(op.rs2.reg_offset() + 4);
 			b.op_call(WIMPORT_WRITE32);
 		} else {
+			// 1/2/4-byte write: direct RAM fast path for area 3 (0x0C-0x0F)
 			emitLoadParam(b, op.rs1);
 			if (!op.rs3.is_null()) {
 				emitLoadParam(b, op.rs3);
 				b.op_i32_add();
 			}
-			emitLoadParam(b, op.rs2);
+			b.op_local_set(LOCAL_TMP);  // LOCAL_TMP = original addr
 
-			u32 writeFunc;
-			switch (op.size) {
-			case 1: writeFunc = WIMPORT_WRITE8; break;
-			case 2: writeFunc = WIMPORT_WRITE16; break;
-			default: writeFunc = WIMPORT_WRITE32; break;
+			b.op_local_get(LOCAL_TMP);
+			b.op_i32_const(0x1FFFFFFF);
+			b.op_i32_and();             // phys = addr & 0x1FFFFFFF
+			b.op_local_tee(LOCAL_TMP);  // LOCAL_TMP = phys
+
+			b.op_i32_const(26);
+			b.op_i32_shr_u();          // area = phys >> 26
+			b.op_i32_const(3);
+			b.op_i32_eq();             // is_ram = (area == 3)
+
+			b.op_if();                 // void if (is_ram)
+			{
+				b.op_local_get(LOCAL_RAM);
+				b.op_local_get(LOCAL_TMP);
+				b.op_i32_const(0x00FFFFFF);
+				b.op_i32_and();
+				b.op_i32_add();        // heap_addr = ram_base + (phys & 0x00FFFFFF)
+				emitLoadParam(b, op.rs2);
+				switch (op.size) {
+				case 1: b.op_i32_store8(0); break;
+				case 2: b.op_i32_store16(0); break;
+				default: b.op_i32_store(0); break;
+				}
 			}
-			b.op_call(writeFunc);
+			b.op_else();
+			{
+				// Slow path: recompute original addr, call import
+				emitLoadParam(b, op.rs1);
+				if (!op.rs3.is_null()) {
+					emitLoadParam(b, op.rs3);
+					b.op_i32_add();
+				}
+				emitLoadParam(b, op.rs2);
+				u32 writeFunc;
+				switch (op.size) {
+				case 1: writeFunc = WIMPORT_WRITE8; break;
+				case 2: writeFunc = WIMPORT_WRITE16; break;
+				default: writeFunc = WIMPORT_WRITE32; break;
+				}
+				b.op_call(writeFunc);
+			}
+			b.op_end();
 		}
 		return true;
 	}
