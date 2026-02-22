@@ -759,7 +759,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 6
+#define EXECUTOR_MODE 4
 
 static u32 pc_hash = 0;
 static u32 block_count = 0;
@@ -1127,10 +1127,12 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 
 #ifdef __EMSCRIPTEN__
 	bool should_log = false;
-	if (block_count <= 2500000) {
+	if (block_count <= 2000000) {
 		should_log = (block_count % 500000 == 0);
+	} else if (block_count <= 2500000) {
+		// Fine-grained: divergence happens in this window
+		should_log = (block_count % 10000 == 0);
 	} else {
-		// Extended checkpoints to find divergence point
 		should_log = (block_count % 5000000 == 0);
 	}
 	if (should_log) {
