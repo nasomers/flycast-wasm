@@ -777,7 +777,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 4
+#define EXECUTOR_MODE 1
 
 static u32 pc_hash = 0;
 u32 g_wasm_block_count = 0;  // global so pvr_regs.cpp can reference it
@@ -1463,6 +1463,33 @@ public:
 				' pc=0x' + ($2>>>0).toString(16) + ' ops=' + $3); },
 				compiledCount, failCount, block->vaddr,
 				(int)block->oplist.size());
+		}
+		// Dump SHIL ops for the specific block where r0 diverges
+		if (block->vaddr == 0x8c00b646 || block->vaddr == 0x8c00b63c) {
+			EM_ASM({ console.log('[BLOCK-DUMP] pc=0x' + ($0>>>0).toString(16) +
+				' ops=' + $1 + ' go=' + $2 + ' gc=' + $3 +
+				' type=' + $4 + ' branch=0x' + ($5>>>0).toString(16) +
+				' next=0x' + ($6>>>0).toString(16) +
+				' sh4size=' + $7); },
+				block->vaddr, (int)block->oplist.size(),
+				block->guest_opcodes, block->guest_cycles,
+				(int)block->BlockType, block->BranchBlock,
+				block->NextBlock, block->sh4_code_size);
+			for (u32 i = 0; i < block->oplist.size(); i++) {
+				auto& sop = block->oplist[i];
+				EM_ASM({ console.log('[BLOCK-OP] [' + $0 + '] shop=' + $1 +
+					' rd_type=' + $2 + ' rd_imm=0x' + ($3>>>0).toString(16) +
+					' rs1_type=' + $4 + ' rs1_imm=0x' + ($5>>>0).toString(16) +
+					' rs2_type=' + $6 + ' rs2_imm=0x' + ($7>>>0).toString(16) +
+					' rs3_type=' + $8 + ' rs3_imm=0x' + ($9>>>0).toString(16) +
+					' size=' + $10); },
+					i, (int)sop.op,
+					(int)sop.rd.type, sop.rd._imm,
+					(int)sop.rs1.type, sop.rs1._imm,
+					(int)sop.rs2.type, sop.rs2._imm,
+					(int)sop.rs3.type, sop.rs3._imm,
+					sop.size);
+			}
 		}
 #endif
 	}
