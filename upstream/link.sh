@@ -53,8 +53,7 @@ emcc -O3 -flto \
   -s FORCE_FILESYSTEM=1 \
   -s WARN_ON_UNDEFINED_SYMBOLS=0 \
   -s ASSERTIONS=0 \
-  -s DISABLE_EXCEPTION_CATCHING=0 \
-  -fexceptions \
+  -s DISABLE_EXCEPTION_CATCHING=1 \
   -Wl,--wrap=glGetString -Wl,--allow-undefined \
   -s FULL_ES3=1 \
   -s MIN_WEBGL_VERSION=2 \
