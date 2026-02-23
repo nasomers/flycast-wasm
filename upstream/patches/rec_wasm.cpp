@@ -28,8 +28,6 @@
 #include "wasm_emit.h"
 
 #include <unordered_map>
-#include <set>
-#include <string>
 #include <cmath>
 #include <cstring>
 
@@ -49,8 +47,6 @@ static_assert(offsetof(Sh4Context, pc) == 0x148, "PC offset mismatch");
 static_assert(offsetof(Sh4Context, jdyn) == 0x14C, "jdyn offset mismatch");
 static_assert(offsetof(Sh4Context, sr.T) == 0x154, "sr.T offset mismatch");
 static_assert(offsetof(Sh4Context, cycle_counter) == 0x174, "cycle_counter offset mismatch");
-static_assert(offsetof(Sh4Context, temp_reg) != 0x174, "FATAL: temp_reg overlaps cycle_counter!");
-static_assert(offsetof(Sh4Context, interrupt_pend) != 0x174, "FATAL: interrupt_pend overlaps cycle_counter!");
 
 // Forward declarations from driver.cpp
 DynarecCodeEntryPtr DYNACALL rdv_FailedToFindBlock(u32 pc);
@@ -116,8 +112,6 @@ static u32 prof_idle_loops_detected = 0;   // blocks detected as idle spin-wait 
 static u32 prof_multiblock_modules = 0;   // multi-block super-block modules compiled
 static u32 prof_multiblock_total_blocks = 0; // total blocks in super-block modules
 static u32 prof_fb_by_op[128] = {};        // runtime fallback calls by op type
-static bool prof_native_opset[128] = {};   // which SHIL ops compiled natively (cumulative)
-static bool prof_fallback_opset[128] = {}; // which SHIL ops compiled as fallback (cumulative)
 static double prof_emulation_ms = 0;       // time in inner block dispatch loop
 static double prof_system_ms = 0;          // time in UpdateSystem_INTC
 
@@ -135,15 +129,6 @@ static u32 jit_dispatch_table[JIT_TABLE_SIZE];  // PC hash → table index (0 = 
 // Dispatch loop exit status
 static int g_dispatch_result = 0;    // 0=timeslice, 1=miss, 3=interrupt
 static u32 g_dispatch_miss_pc = 0;
-static u32 g_idle_zeroed = 0;  // blocks that set cycle_counter to exactly 0
-
-// ============================================================
-// Hot block tracking — per-block execution counts + opcode lists
-// ============================================================
-// Tracks which blocks execute most frequently (for lock-up diagnosis).
-// blockOpcodeStr stores a human-readable SHIL opcode list per block PC.
-static std::unordered_map<u32, u32> blockExecCount;   // PC → execution count (per mainloop)
-static std::unordered_map<u32, std::string> blockOpcodeStr;  // PC → "readm,add,seteq,..."
 
 // ============================================================
 // Memory access cycle penalties — approximates Sh4Cycles
@@ -804,7 +789,6 @@ extern u32 g_wasm_block_count;
 #define EXECUTOR_MODE 6
 #define SHIL_START_BLOCK 24168000
 
-// DIAGNOSTIC: Bypass WASM blocks entirely. Run blocks via C++ SHIL interpreter
 // Reference executor: per-instruction via OpPtr
 // Per-instruction cycle counting (1 per instruction executed)
 // Does NOT follow branches within blocks — exits at first branch
@@ -1446,8 +1430,7 @@ EM_JS(int, wasm_prof_exec_count, (), {
 // Returns number of blocks executed. g_dispatch_result indicates exit reason:
 //   0 = timeslice complete (cycle_counter <= 0)
 //   1 = cache miss (g_dispatch_miss_pc = PC needing compilation)
-// Matches native x64/ARM64 dynarec: NO interrupt check between blocks.
-// Interrupts are handled at the timeslice boundary via UpdateSystem_INTC().
+//   3 = interrupt pending (needs C++ UpdateINTC)
 static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
 	typedef void (*block_fn_t)(u32, u32);
 	Sh4Context& ctx = Sh4cntx;
@@ -1469,9 +1452,6 @@ static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
 		block_fn_t fn = (block_fn_t)(uintptr_t)table_idx;
 		fn(ctx_ptr, ram_base);
 		blocks_run++;
-		blockExecCount[pc]++;
-
-		if (ctx.cycle_counter == 0) g_idle_zeroed++;
 
 		if (ctx.interrupt_pend) {
 			g_dispatch_result = 3;  // interrupt
@@ -1590,7 +1570,6 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 		shil_opcode& op = block->oplist[i];
 		if (!emitShilOp(b, op, block, i, cache)) {
 			prof_fallback_ops_compiled++;
-			if (op.op < 128) prof_fallback_opset[op.op] = true;
 			// Unhandled op — flush, call fallback, reload
 			emitFlushAll(b, cache);
 			b.op_i32_const((s32)block->vaddr);
@@ -1599,7 +1578,6 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 			emitReloadAll(b, cache);
 		} else {
 			prof_native_ops_compiled++;
-			if (op.op < 128) prof_native_opset[op.op] = true;
 		}
 	}
 
@@ -1609,6 +1587,7 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	// Epilogue: writeback all dirty cached registers to ctx memory
 	emitFlushAll(b, cache);
 
+	// Idle loop fast-forward: set cycle_counter = 0 when looping back to self
 	if (is_idle_loop) {
 		if (bcls == BET_CLS_Static) {
 			// Unconditional self-loop: always fast-forward
@@ -1812,7 +1791,6 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 			shil_opcode& op = blk->oplist[j];
 			if (!emitShilOp(b, op, blk, j, cache)) {
 				prof_fallback_ops_compiled++;
-				if (op.op < 128) prof_fallback_opset[op.op] = true;
 				emitFlushAll(b, cache);
 				b.op_i32_const((s32)blk->vaddr);
 				b.op_i32_const((s32)j);
@@ -1820,7 +1798,6 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 				emitReloadAll(b, cache);
 			} else {
 				prof_native_ops_compiled++;
-				if (op.op < 128) prof_native_opset[op.op] = true;
 			}
 		}
 
@@ -1993,39 +1970,11 @@ public:
 			codeBuffer->advance(4);
 
 #ifdef __EMSCRIPTEN__
-		// Store SHIL opcode string for hot block diagnostics
-		{
-			std::string ops;
-			std::set<int> seen;
-			for (auto& op : block->oplist) {
-				if (seen.insert(op.op).second) {
-					if (!ops.empty()) ops += ",";
-					ops += shil_opcode_name(op.op);
-				}
-			}
-			blockOpcodeStr[block->vaddr] = ops;
-		}
-
-		// Log every compiled block with SHIL opcode list
-		{
-			// Build full SHIL disassembly string for this block
-			std::string shilList;
-			for (u32 i = 0; i < block->oplist.size(); i++) {
-				if (i > 0) shilList += " | ";
-				shilList += block->oplist[i].dissasm();
-			}
-			EM_ASM({ console.log('[BLOCK] #' + $0 +
-				' pc=0x' + ($1>>>0).toString(16) +
-				' nops=' + $2 + ' cycles=' + $3 +
-				' exit=' + $4 +
-				' branch=0x' + ($5>>>0).toString(16) +
-				' next=0x' + ($6>>>0).toString(16) +
-				'\n  SHIL: ' + UTF8ToString($7)); },
-				compiledCount, block->vaddr,
-				(int)block->oplist.size(), block->guest_cycles,
-				(int)block->BlockType,
-				block->BranchBlock, block->NextBlock,
-				shilList.c_str());
+		if (compiledCount <= 10 || (compiledCount % 200 == 0)) {
+			EM_ASM({ console.log('[rec_wasm] compiled=' + $0 + ' fail=' + $1 +
+				' pc=0x' + ($2>>>0).toString(16) + ' ops=' + $3); },
+				compiledCount, failCount, block->vaddr,
+				(int)block->oplist.size());
 		}
 #endif
 	}
@@ -2035,6 +1984,8 @@ public:
 		// CRITICAL: Branch instructions with delay slots call executeDelaySlot()
 		// which dereferences Sh4Interpreter::Instance.
 		Sh4Interpreter::Instance = Sh4Recompiler::Instance;
+
+		// (per-frame cache flush removed — stale block theory disproven)
 
 #ifdef __EMSCRIPTEN__
 		static int mainloop_count = 0;
@@ -2051,28 +2002,6 @@ public:
 		u32 fb_count_start = g_shil_fb_call_count;
 		double compile_ms_start = wasm_prof_compile_ms();
 
-		// Frame cap + HUD state
-		double frame_start = ml_start;
-		static double hud_last_update = 0;
-		static u32 hud_frame_count = 0;
-		static u32 hud_timeslice_count = 0;
-		static const double FRAME_BUDGET_MS = 16.667; // ~60 FPS host
-
-		// Create HUD overlay on first mainloop
-		static bool hud_created = false;
-		if (!hud_created) {
-			EM_ASM({
-				var d = document.createElement('div');
-				d.id = 'flycast-hud';
-				d.style.cssText = 'position:fixed;top:8px;left:8px;z-index:99999;' +
-					'background:rgba(0,0,0,0.75);color:#0f0;font:bold 14px monospace;' +
-					'padding:6px 10px;border-radius:4px;pointer-events:none;';
-				d.textContent = 'Flycast JIT starting...';
-				document.body.appendChild(d);
-			});
-			hud_created = true;
-		}
-
 		try {
 			do {
 				try {
@@ -2080,17 +2009,15 @@ public:
 					u32 ctx_ptr = (u32)(uintptr_t)sh4ctx;
 					u32 ram_ptr = (u32)(uintptr_t)&mem_b[0];
 
-					u32 exit_ts_complete = 0, exit_miss = 0, exit_miss_then_compiled = 0;
+					// Restored: WASM dispatch via call_indirect (SHIL path)
 					while (sh4ctx->cycle_counter > 0) {
 						int nblocks = c_dispatch_loop(ctx_ptr, ram_ptr);
 						blockExecs += nblocks;
 						g_wasm_block_count += nblocks;
 
 						if (g_dispatch_result == 0) {
-							exit_ts_complete++;
 							break;  // timeslice complete
 						} else if (g_dispatch_result == 1) {
-							exit_miss++;
 							// Cache miss — compile the block
 							u32 miss_pc = g_dispatch_miss_pc;
 							auto it = blockByVaddr.find(miss_pc);
@@ -2107,17 +2034,10 @@ public:
 								sh4ctx->cycle_counter -= 1;
 								interpExecs++;
 							}
-							// Block now compiled — dispatch loop will find it next iteration
 						} else if (g_dispatch_result == 3) {
 							// Interrupt pending
 							UpdateINTC();
 						}
-					}
-
-					// Debug: log dispatch loop exit reasons (first 3 mainloops)
-					if (mainloop_count <= 3 && timeslices < 5) {
-						EM_ASM({ console.log('[dispatch-debug] ts#' + $0 + ': cc_before=' + $1 + ' blocks=' + $2 + ' exit_ts=' + $3 + ' exit_miss=' + $4); },
-							timeslices, sh4ctx->cycle_counter, blockExecs, exit_ts_complete, exit_miss);
 					}
 
 					double emu_t1 = emscripten_get_now();
@@ -2134,31 +2054,6 @@ public:
 				} catch (const SH4ThrownException& ex) {
 					Do_Exception(ex.epc, ex.expEvn);
 					sh4ctx->cycle_counter += 5;
-				}
-
-				// Frame cap: yield to browser OUTSIDE try/catch for ASYNCIFY compat
-				hud_timeslice_count++;
-				double now = emscripten_get_now();
-				if (now - frame_start >= FRAME_BUDGET_MS) {
-					hud_frame_count++;
-					if (now - hud_last_update >= 1000.0) {
-						double elapsed = now - hud_last_update;
-						double fps = hud_frame_count / (elapsed / 1000.0);
-						double emu_speed = (hud_timeslice_count * SH4_TIMESLICE) /
-							(elapsed / 1000.0) / (double)SH4_MAIN_CLOCK * 100.0;
-						EM_ASM({
-							var el = document.getElementById('flycast-hud');
-							if (el) el.textContent =
-								$0.toFixed(1) + ' FPS | ' +
-								$1.toFixed(0) + '% speed | ' +
-								$2 + ' blocks';
-						}, fps, emu_speed, blockExecs);
-						hud_frame_count = 0;
-						hud_timeslice_count = 0;
-						hud_last_update = now;
-					}
-					emscripten_sleep(0);
-					frame_start = emscripten_get_now();
 				}
 			} while (sh4ctx->CpuRunning);
 
@@ -2236,12 +2131,9 @@ public:
 				prof_idle_loops_detected  // $11 idle loops
 			);
 
-			// Multi-block + idle stats (separate EM_ASM to avoid 16-arg limit)
-			EM_ASM({
-				console.log('Multi-blocks:     ' + $0 + ' modules (' + $1 + ' blocks)');
-				console.log('Idle-zeroed:      ' + $2 + '/' + $3 + ' (' + ($2/$3*100).toFixed(1) + '% of blocks set cc=0)');
-			}, prof_multiblock_modules, prof_multiblock_total_blocks, g_idle_zeroed, blockExecs);
-			g_idle_zeroed = 0;  // reset for next mainloop
+			// Multi-block stats (separate EM_ASM to avoid 16-arg limit)
+			EM_ASM({ console.log('Multi-blocks:     ' + $0 + ' modules (' + $1 + ' blocks)'); },
+				prof_multiblock_modules, prof_multiblock_total_blocks);
 
 			// Dump top fallback ops by frequency
 			struct FbEntry { int op; u32 count; };
@@ -2264,52 +2156,6 @@ public:
 					top[j].op, top[j].count);
 			}
 
-			// Dump cumulative SHIL opcode inventory (for cross-game diffing)
-			EM_ASM({ console.log('--- SHIL Opcode Inventory (cumulative) ---'); });
-			{
-				// Native WASM opcodes
-				EM_ASM({ console.log('NATIVE_OPS:'); });
-				for (int i = 0; i < 128; i++) {
-					if (prof_native_opset[i]) {
-						EM_ASM({ console.log('  ' + UTF8ToString($0)); },
-							shil_opcode_name(i));
-					}
-				}
-				// Fallback (interpreter) opcodes
-				EM_ASM({ console.log('FALLBACK_OPS:'); });
-				for (int i = 0; i < 128; i++) {
-					if (prof_fallback_opset[i]) {
-						EM_ASM({ console.log('  ' + UTF8ToString($0)); },
-							shil_opcode_name(i));
-					}
-				}
-			}
-
-			// Dump top 10 hot blocks (most executed this mainloop)
-			{
-				struct HotEntry { u32 pc; u32 count; };
-				HotEntry hot[10] = {};
-				for (auto& [pc, cnt] : blockExecCount) {
-					for (int j = 0; j < 10; j++) {
-						if (cnt > hot[j].count) {
-							for (int k = 9; k > j; k--) hot[k] = hot[k-1];
-							hot[j] = { pc, cnt };
-							break;
-						}
-					}
-				}
-				EM_ASM({ console.log('--- Hot Blocks (top 10 this mainloop) ---'); });
-				for (int j = 0; j < 10 && hot[j].count > 0; j++) {
-					auto it = blockOpcodeStr.find(hot[j].pc);
-					const char* ops = (it != blockOpcodeStr.end()) ? it->second.c_str() : "?";
-					EM_ASM({ console.log('  PC=0x' + ($0>>>0).toString(16) +
-						' execs=' + $1.toLocaleString() +
-						' ops=[' + UTF8ToString($2) + ']'); },
-						hot[j].pc, hot[j].count, ops);
-				}
-				blockExecCount.clear();
-			}
-
 			// Reset profiling for next mainloop
 			prof_emulation_ms = 0;
 			prof_system_ms = 0;
@@ -2329,12 +2175,8 @@ public:
 	{
 		wasm_clear_cache();
 		memset(jit_dispatch_table, 0, sizeof(jit_dispatch_table));
-		memset(prof_native_opset, 0, sizeof(prof_native_opset));
-		memset(prof_fallback_opset, 0, sizeof(prof_fallback_opset));
 		blockByVaddr.clear();
 		blockCodeHash.clear();
-		blockExecCount.clear();
-		blockOpcodeStr.clear();
 		compiledCount = 0;
 		failCount = 0;
 #ifdef __EMSCRIPTEN__
