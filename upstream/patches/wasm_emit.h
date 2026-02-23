@@ -792,6 +792,193 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 		emitPostStore(b, op.rd, cache);
 		return true;
 
+	// ---- Tier 3: Vector/SIMD FPU ops (inline WASM, avoids shil_fb cross-module call) ----
+
+	case shop_fmac:
+		// rd = rs2 * rs3 + rs1  (fused multiply-add)
+		b.op_local_get(LOCAL_CTX);
+		emitLoadParamF32(b, op.rs1);        // fn (accumulator)
+		emitLoadParamF32(b, op.rs2);        // f0
+		emitLoadParamF32(b, op.rs3);        // fm
+		b.op_f32_mul();                     // f0 * fm
+		b.op_f32_add();                     // + fn
+		emitStoreRdF32(b, op.rd);
+		return true;
+
+	case shop_fsrra:
+		// rd = 1.0f / sqrt(rs1)
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_const(1.0f);
+		emitLoadParamF32(b, op.rs1);
+		b.op_f32_sqrt();
+		b.op_f32_div();
+		emitStoreRdF32(b, op.rd);
+		return true;
+
+	case shop_fipr: {
+		// 4-element dot product: rd = sum(rs1[i] * rs2[i]) for i=0..3
+		// Uses f32 accumulation (matches hardware precision)
+		u32 off1 = op.rs1.reg_offset(), off2 = op.rs2.reg_offset();
+		b.op_local_get(LOCAL_CTX);  // base for store
+		// Element 0
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_load(off1);
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_load(off2);
+		b.op_f32_mul();
+		// Element 1
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_load(off1 + 4);
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_load(off2 + 4);
+		b.op_f32_mul();
+		b.op_f32_add();
+		// Element 2
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_load(off1 + 8);
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_load(off2 + 8);
+		b.op_f32_mul();
+		b.op_f32_add();
+		// Element 3
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_load(off1 + 12);
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_load(off2 + 12);
+		b.op_f32_mul();
+		b.op_f32_add();
+		// Store result
+		emitStoreRdF32(b, op.rd);
+		return true;
+	}
+
+	case shop_ftrv: {
+		// 4x4 matrix (rs2) * 4-vector (rs1) → rd
+		// rd == rs1 always (in-place), so we must read all inputs before writing.
+		// Strategy: compute all 4 results using a WASM local for temp storage.
+		// Matrix layout: m[col][row] at moff + (col*4 + row)*4
+		u32 voff = op.rs1.reg_offset();
+		u32 moff = op.rs2.reg_offset();
+		u32 doff = op.rd.reg_offset();
+
+		// Use LOCAL_TMP as scratch for partial results
+		// We need 3 temps: store results 0-2 on stack via locals, write result 3 last
+		// Actually simpler: read all 4 vector elements first into locals
+		// But we only have LOCAL_TMP. Instead: compute & store each row,
+		// but since doff==voff (aliasing), we must save input first.
+
+		// Save v[0..3] to LOCAL_TMP and stack by reading them upfront
+		// We'll use a different approach: compute from last to first won't help
+		// since matrix reads v[j] for all j in each row.
+		// Best approach: use i32 reinterpret to save vector in temp locals.
+		// We don't have extra locals... but we can store results to ctx at
+		// a temporary offset. However, that's fragile.
+
+		// Simplest correct approach: fall through to shil_fb for ftrv
+		// since it already handles aliasing with temp copy.
+		// The cross-module call cost is acceptable since ftrv is ~16 multiplies.
+		return false;
+	}
+
+	case shop_frswap: {
+		// Swap 16 floats (64 bytes) between rs1 and rd register banks
+		u32 off1 = op.rs1.reg_offset(), off2 = op.rd.reg_offset();
+		for (int i = 0; i < 16; i++) {
+			// tmp = ctx[off1+i*4]
+			b.op_local_get(LOCAL_CTX);
+			b.op_i32_load(off1 + i * 4);
+			b.op_local_set(LOCAL_TMP);
+			// ctx[off1+i*4] = ctx[off2+i*4]
+			b.op_local_get(LOCAL_CTX);
+			b.op_local_get(LOCAL_CTX);
+			b.op_i32_load(off2 + i * 4);
+			b.op_i32_store(off1 + i * 4);
+			// ctx[off2+i*4] = tmp
+			b.op_local_get(LOCAL_CTX);
+			b.op_local_get(LOCAL_TMP);
+			b.op_i32_store(off2 + i * 4);
+		}
+		return true;
+	}
+
+#if 0  // BISECT: shld/shad disabled
+	case shop_shld: {
+		// Variable shift left/right (unsigned) depending on sign of rs2
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs2, cache);  // shift amount
+		b.op_i32_const(0);
+		b.op_i32_ge_s();                        // shift >= 0?
+		b.op_if(WASM_TYPE_I32);
+			// shift >= 0: val << (shift & 0x1F)
+			emitLoadParamCached(b, op.rs1, cache);
+			emitLoadParamCached(b, op.rs2, cache);
+			b.op_i32_const(0x1F);
+			b.op_i32_and();
+			b.op_i32_shl();
+		b.op_else();
+			// shift < 0: check if (-shift & 0x1F) == 0
+			emitLoadParamCached(b, op.rs2, cache);
+			b.op_i32_const(0);
+			b.op_i32_sub();  // negate
+			b.op_i32_const(0x1F);
+			b.op_i32_and();
+			b.op_i32_eqz();
+			b.op_if(WASM_TYPE_I32);
+				b.op_i32_const(0);  // result is 0
+			b.op_else();
+				emitLoadParamCached(b, op.rs1, cache);
+				emitLoadParamCached(b, op.rs2, cache);
+				b.op_i32_const(0);
+				b.op_i32_sub();  // negate
+				b.op_i32_const(0x1F);
+				b.op_i32_and();
+				b.op_i32_shr_u();
+			b.op_end();
+		b.op_end();
+		emitPostStore(b, op.rd, cache);
+		return true;
+	}
+
+	case shop_shad: {
+		// Variable arithmetic shift depending on sign of rs2
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs2, cache);
+		b.op_i32_const(0);
+		b.op_i32_ge_s();
+		b.op_if(WASM_TYPE_I32);
+			// shift >= 0: val << (shift & 0x1F)
+			emitLoadParamCached(b, op.rs1, cache);
+			emitLoadParamCached(b, op.rs2, cache);
+			b.op_i32_const(0x1F);
+			b.op_i32_and();
+			b.op_i32_shl();
+		b.op_else();
+			emitLoadParamCached(b, op.rs2, cache);
+			b.op_i32_const(0);
+			b.op_i32_sub();
+			b.op_i32_const(0x1F);
+			b.op_i32_and();
+			b.op_i32_eqz();
+			b.op_if(WASM_TYPE_I32);
+				// (-shift & 0x1F) == 0: val >> 31
+				emitLoadParamCached(b, op.rs1, cache);
+				b.op_i32_const(31);
+				b.op_i32_shr_s();
+			b.op_else();
+				emitLoadParamCached(b, op.rs1, cache);
+				emitLoadParamCached(b, op.rs2, cache);
+				b.op_i32_const(0);
+				b.op_i32_sub();
+				b.op_i32_const(0x1F);
+				b.op_i32_and();
+				b.op_i32_shr_s();  // arithmetic shift
+			b.op_end();
+		b.op_end();
+		emitPostStore(b, op.rd, cache);
+		return true;
+	}
+#endif  // BISECT shld/shad
+
 	case shop_mov64:
 		// Copy 64 bits (float register pairs, not cached)
 		if (op.rs1.is_reg() && op.rd.is_reg()) {

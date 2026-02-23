@@ -84,6 +84,9 @@ function serveStatic(res, filePath) {
   res.writeHead(200, {
     'Content-Type': getMime(filePath),
     'Content-Length': stat.size,
+    'Cache-Control': 'no-store, no-cache, must-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0',
     ...ISOLATION_HEADERS,
   })
   fs.createReadStream(filePath).pipe(res)
