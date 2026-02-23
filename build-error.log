@@ -1,0 +1,7 @@
+=== STEP 1: Incremental CMake Build ===
+2 warnings and 4 errors generated.
+make[2]: *** [CMakeFiles/flycast_libretro.dir/build.make:3500: CMakeFiles/flycast_libretro.dir/core/rec-wasm/rec_wasm.cpp.o] Error 1
+make[1]: *** [CMakeFiles/Makefile2:1034: CMakeFiles/flycast_libretro.dir/all] Error 2
+make: *** [Makefile:156: all] Error 2
+emmake: error: 'make -j16' failed (returned 2)
+FAILED: CMake build
