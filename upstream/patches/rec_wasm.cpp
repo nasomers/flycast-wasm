@@ -2034,6 +2034,9 @@ public:
 		u32 blockExecs = 0;
 		u32 interpExecs = 0;
 		u32 timeslices = 0;
+		u32 compilesThisFrame = 0;
+		double compileTimeThisFrame = 0;
+		const double COMPILE_TIME_BUDGET_MS = 8.0;  // max ms spent compiling per frame (~half a 60fps frame)
 		double ml_start = emscripten_get_now();
 		u32 fb_count_start = g_shil_fb_call_count;
 		double compile_ms_start = wasm_prof_compile_ms();
@@ -2095,14 +2098,31 @@ public:
 							break;  // timeslice complete
 						} else if (g_dispatch_result == 1) {
 							exit_miss++;
-							// Cache miss — compile the block
 							u32 miss_pc = g_dispatch_miss_pc;
-							auto it = blockByVaddr.find(miss_pc);
-							if (it == blockByVaddr.end()) {
-								rdv_FailedToFindBlock(miss_pc);
-								it = blockByVaddr.find(miss_pc);
-							}
-							if (it == blockByVaddr.end()) {
+
+							if (compileTimeThisFrame < COMPILE_TIME_BUDGET_MS) {
+								// Under time budget — compile the block
+								double t0 = emscripten_get_now();
+								auto it = blockByVaddr.find(miss_pc);
+								if (it == blockByVaddr.end()) {
+									rdv_FailedToFindBlock(miss_pc);
+									compilesThisFrame++;
+									it = blockByVaddr.find(miss_pc);
+								}
+								compileTimeThisFrame += (emscripten_get_now() - t0);
+								if (it == blockByVaddr.end()) {
+									// Compilation failed — interpret one instruction
+									sh4ctx->pc = miss_pc + 2;
+									u16 rawOp = IReadMem16(miss_pc);
+									if (sh4ctx->sr.FD == 1 && OpDesc[rawOp]->IsFloatingPoint())
+										throw SH4ThrownException(miss_pc, Sh4Ex_FpuDisabled);
+									OpPtr[rawOp](sh4ctx, rawOp);
+									sh4ctx->cycle_counter -= 1;
+									interpExecs++;
+								}
+							} else {
+								// Over time budget — interpret instead of compiling.
+								// Block will be compiled on a future frame.
 								sh4ctx->pc = miss_pc + 2;
 								u16 rawOp = IReadMem16(miss_pc);
 								if (sh4ctx->sr.FD == 1 && OpDesc[rawOp]->IsFloatingPoint())
@@ -2111,7 +2131,6 @@ public:
 								sh4ctx->cycle_counter -= 1;
 								interpExecs++;
 							}
-							// Block now compiled — dispatch loop will find it next iteration
 						} else if (g_dispatch_result == 3) {
 							// Interrupt pending
 							UpdateINTC();
