@@ -805,11 +805,6 @@ extern u32 g_wasm_block_count;
 #define SHIL_START_BLOCK 24168000
 
 // DIAGNOSTIC: Bypass WASM blocks entirely. Run blocks via C++ SHIL interpreter
-// with the JIT's mainloop structure (same dispatch, timing, scheduling).
-// If rendering is still garbage with this: problem is in mainloop/timing.
-// If rendering is fixed: problem is in WASM block structure.
-#define FORCE_CPP_DISPATCH 0
-
 // Reference executor: per-instruction via OpPtr
 // Per-instruction cycle counting (1 per instruction executed)
 // Does NOT follow branches within blocks — exits at first branch
@@ -1614,10 +1609,6 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	// Epilogue: writeback all dirty cached registers to ctx memory
 	emitFlushAll(b, cache);
 
-	// Idle loop fast-forward: DISABLED for debugging rendering corruption
-	// When enabled, this burns through timeslices instantly for self-looping blocks,
-	// potentially desynchronizing PVR rendering events from SH4 execution.
-#if 0
 	if (is_idle_loop) {
 		if (bcls == BET_CLS_Static) {
 			// Unconditional self-loop: always fast-forward
@@ -1637,7 +1628,6 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 			b.op_end();
 		}
 	}
-#endif
 
 	b.endFuncBody();
 	b.endSection();
@@ -2061,6 +2051,28 @@ public:
 		u32 fb_count_start = g_shil_fb_call_count;
 		double compile_ms_start = wasm_prof_compile_ms();
 
+		// Frame cap + HUD state
+		double frame_start = ml_start;
+		static double hud_last_update = 0;
+		static u32 hud_frame_count = 0;
+		static u32 hud_timeslice_count = 0;
+		static const double FRAME_BUDGET_MS = 16.667; // ~60 FPS host
+
+		// Create HUD overlay on first mainloop
+		static bool hud_created = false;
+		if (!hud_created) {
+			EM_ASM({
+				var d = document.createElement('div');
+				d.id = 'flycast-hud';
+				d.style.cssText = 'position:fixed;top:8px;left:8px;z-index:99999;' +
+					'background:rgba(0,0,0,0.75);color:#0f0;font:bold 14px monospace;' +
+					'padding:6px 10px;border-radius:4px;pointer-events:none;';
+				d.textContent = 'Flycast JIT starting...';
+				document.body.appendChild(d);
+			});
+			hud_created = true;
+		}
+
 		try {
 			do {
 				try {
@@ -2069,46 +2081,6 @@ public:
 					u32 ram_ptr = (u32)(uintptr_t)&mem_b[0];
 
 					u32 exit_ts_complete = 0, exit_miss = 0, exit_miss_then_compiled = 0;
-#if FORCE_CPP_DISPATCH
-					// DIAGNOSTIC: Pure C++ block execution (no WASM blocks).
-					// Same mainloop structure as JIT, but blocks run via C++ SHIL interpreter.
-					while (sh4ctx->cycle_counter > 0) {
-						u32 pc = sh4ctx->pc;
-						auto it = blockByVaddr.find(pc);
-						if (it == blockByVaddr.end()) {
-							rdv_FailedToFindBlock(pc);
-							it = blockByVaddr.find(pc);
-						}
-						if (it == blockByVaddr.end()) {
-							// Can't find/compile block — interpret one instruction
-							sh4ctx->pc = pc + 2;
-							u16 rawOp = IReadMem16(pc);
-							if (sh4ctx->sr.FD == 1 && OpDesc[rawOp]->IsFloatingPoint())
-								throw SH4ThrownException(pc, Sh4Ex_FpuDisabled);
-							OpPtr[rawOp](sh4ctx, rawOp);
-							sh4ctx->cycle_counter -= 1;
-							interpExecs++;
-						} else {
-							RuntimeBlockInfo* block = it->second;
-							// Execute block via C++ SHIL interpreter
-							sh4ctx->cycle_counter -= block->guest_cycles;
-							g_ifb_exception_pending = false;
-							for (u32 i = 0; i < block->oplist.size(); i++)
-								wasm_exec_shil_fb(block->vaddr, i);
-							applyBlockExitCpp(block);
-							if (g_ifb_exception_pending) {
-								Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
-								g_ifb_exception_pending = false;
-							}
-							blockExecs++;
-							g_wasm_block_count++;
-							blockExecCount[pc]++;
-						}
-						if (sh4ctx->interrupt_pend)
-							UpdateINTC();
-					}
-					exit_ts_complete++;
-#else
 					while (sh4ctx->cycle_counter > 0) {
 						int nblocks = c_dispatch_loop(ctx_ptr, ram_ptr);
 						blockExecs += nblocks;
@@ -2141,7 +2113,6 @@ public:
 							UpdateINTC();
 						}
 					}
-#endif
 
 					// Debug: log dispatch loop exit reasons (first 3 mainloops)
 					if (mainloop_count <= 3 && timeslices < 5) {
@@ -2163,6 +2134,31 @@ public:
 				} catch (const SH4ThrownException& ex) {
 					Do_Exception(ex.epc, ex.expEvn);
 					sh4ctx->cycle_counter += 5;
+				}
+
+				// Frame cap: yield to browser OUTSIDE try/catch for ASYNCIFY compat
+				hud_timeslice_count++;
+				double now = emscripten_get_now();
+				if (now - frame_start >= FRAME_BUDGET_MS) {
+					hud_frame_count++;
+					if (now - hud_last_update >= 1000.0) {
+						double elapsed = now - hud_last_update;
+						double fps = hud_frame_count / (elapsed / 1000.0);
+						double emu_speed = (hud_timeslice_count * SH4_TIMESLICE) /
+							(elapsed / 1000.0) / (double)SH4_MAIN_CLOCK * 100.0;
+						EM_ASM({
+							var el = document.getElementById('flycast-hud');
+							if (el) el.textContent =
+								$0.toFixed(1) + ' FPS | ' +
+								$1.toFixed(0) + '% speed | ' +
+								$2 + ' blocks';
+						}, fps, emu_speed, blockExecs);
+						hud_frame_count = 0;
+						hud_timeslice_count = 0;
+						hud_last_update = now;
+					}
+					emscripten_sleep(0);
+					frame_start = emscripten_get_now();
 				}
 			} while (sh4ctx->CpuRunning);
 
