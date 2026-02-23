@@ -47,6 +47,8 @@ static_assert(offsetof(Sh4Context, pc) == 0x148, "PC offset mismatch");
 static_assert(offsetof(Sh4Context, jdyn) == 0x14C, "jdyn offset mismatch");
 static_assert(offsetof(Sh4Context, sr.T) == 0x154, "sr.T offset mismatch");
 static_assert(offsetof(Sh4Context, cycle_counter) == 0x174, "cycle_counter offset mismatch");
+static_assert(offsetof(Sh4Context, temp_reg) != 0x174, "FATAL: temp_reg overlaps cycle_counter!");
+static_assert(offsetof(Sh4Context, interrupt_pend) != 0x174, "FATAL: interrupt_pend overlaps cycle_counter!");
 
 // Forward declarations from driver.cpp
 DynarecCodeEntryPtr DYNACALL rdv_FailedToFindBlock(u32 pc);

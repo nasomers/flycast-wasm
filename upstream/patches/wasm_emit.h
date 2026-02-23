@@ -61,6 +61,10 @@ struct RegCache {
 	u32 nextLocal = 3;  // first available (0=ctx, 1=ram, 2=tmp)
 
 	void addOffset(u32 offset) {
+		// Never cache cycle_counter or doSqWrite — prologue writes cycle_counter
+		// directly, and flushing a cached copy would overwrite the decremented value
+		if (offset == ctx_off::CYCLE_COUNTER || offset == ctx_off::CYCLE_COUNTER + 4)
+			return;
 		if (entries.find(offset) == entries.end()) {
 			RegCacheEntry e;
 			e.wasmLocal = nextLocal++;
