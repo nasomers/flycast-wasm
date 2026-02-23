@@ -129,6 +129,7 @@ static double prof_system_ms = 0;          // time in UpdateSystem_INTC
 #define JIT_TABLE_SIZE (1 << 20)  // 1M entries (~4MB)
 #define JIT_TABLE_MASK (JIT_TABLE_SIZE - 1)
 static u32 jit_dispatch_table[JIT_TABLE_SIZE];  // PC hash → table index (0 = miss)
+static u32 jit_dispatch_pc[JIT_TABLE_SIZE];    // PC hash → actual PC (collision guard)
 
 // Dispatch loop exit status
 static int g_dispatch_result = 0;    // 0=timeslice, 1=miss, 3=interrupt
@@ -1455,8 +1456,8 @@ static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
 		u32 key = (pc >> 1) & JIT_TABLE_MASK;
 		u32 table_idx = jit_dispatch_table[key];
 
-		if (table_idx == 0) {
-			g_dispatch_result = 1;  // miss
+		if (table_idx == 0 || jit_dispatch_pc[key] != pc) {
+			g_dispatch_result = 1;  // miss or collision
 			g_dispatch_miss_pc = pc;
 			return blocks_run;
 		}
@@ -1968,7 +1969,9 @@ public:
 
 		if (table_idx > 0) {
 			// Store in dispatch table — (pc>>1)&MASK handles address aliasing
-			jit_dispatch_table[(block->vaddr >> 1) & JIT_TABLE_MASK] = (u32)table_idx;
+			u32 key = (block->vaddr >> 1) & JIT_TABLE_MASK;
+			jit_dispatch_table[key] = (u32)table_idx;
+			jit_dispatch_pc[key] = block->vaddr;
 			compiledCount++;
 		} else {
 			failCount++;
@@ -2016,9 +2019,8 @@ public:
 		u32 fb_count_start = g_shil_fb_call_count;
 		double compile_ms_start = wasm_prof_compile_ms();
 
-		try {
-			do {
-				try {
+		do {
+			try {
 					double emu_t0 = emscripten_get_now();
 					u32 ctx_ptr = (u32)(uintptr_t)sh4ctx;
 					u32 ram_ptr = (u32)(uintptr_t)&mem_b[0];
@@ -2118,14 +2120,35 @@ public:
 				} catch (const SH4ThrownException& ex) {
 					Do_Exception(ex.epc, ex.expEvn);
 					sh4ctx->cycle_counter += 5;
-				}
-			} while (sh4ctx->CpuRunning);
-
-		} catch (...) {
-#ifdef __EMSCRIPTEN__
-			EM_ASM({ console.log('[rec_wasm] WARNING: mainloop exited via catch(...)'); });
-#endif
-		}
+				} catch (...) {
+					// WASM trap (out-of-bounds, unreachable, type mismatch).
+					// Invalidate the block at current PC and fall back to interpreter.
+					u32 trap_pc = sh4ctx->pc;
+					u32 trap_key = (trap_pc >> 1) & JIT_TABLE_MASK;
+					static u32 trap_log_count = 0;
+					if (trap_log_count < 50) {
+						trap_log_count++;
+						EM_ASM({ console.log('[JIT-TRAP] pc=0x' + ($0>>>0).toString(16) +
+							' key=' + $1 + ' — invalidating block, falling back to interpreter'); },
+							trap_pc, trap_key);
+					}
+					// Evict from dispatch table
+					jit_dispatch_table[trap_key] = 0;
+					jit_dispatch_pc[trap_key] = 0;
+					// Evict from block maps
+					auto it = blockByVaddr.find(trap_pc);
+					if (it != blockByVaddr.end()) {
+						blockByVaddr.erase(it);
+					}
+					blockCodeHash.erase(trap_pc);
+					// Interpret one instruction to advance past the trap
+					sh4ctx->pc = trap_pc + 2;
+					u16 rawOp = IReadMem16(trap_pc);
+					OpPtr[rawOp](sh4ctx, rawOp);
+					sh4ctx->cycle_counter -= 1;
+					interpExecs++;
+			}
+		} while (sh4ctx->CpuRunning);
 
 		sh4ctx->CpuRunning = false;
 
@@ -2239,6 +2262,7 @@ public:
 	{
 		wasm_clear_cache();
 		memset(jit_dispatch_table, 0, sizeof(jit_dispatch_table));
+		memset(jit_dispatch_pc, 0, sizeof(jit_dispatch_pc));
 		blockByVaddr.clear();
 		blockCodeHash.clear();
 		blockExecCount.clear();

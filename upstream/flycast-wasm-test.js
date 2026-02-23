@@ -36,7 +36,7 @@ const PROJECT_DIR = 'C:\\DEV Projects\\flycast-wasm';
 const ROM_DIR = 'C:\\DEV Projects\\flycast-wasm\\demo\\roms';
 const SERVER_PORT = 3001;
 const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
-const TEST_DURATION_MS = 30000;
+const TEST_DURATION_MS = 120000; // Extended for slow diagnostic builds (2 FPS)
 const ROM_CLICK_TEXT = '18 Wheeler - American Pro Trucker (USA).chd';
 const OUTPUT_DIR = path.join(PROJECT_DIR, 'upstream');
 
