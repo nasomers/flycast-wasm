@@ -1,12 +1,19 @@
 # Flycast WASM
 
-**Sega Dreamcast emulation in the browser via WebAssembly.**
+Sega Dreamcast emulation in the browser via WebAssembly.
 
-The first known public build of [Flycast](https://github.com/flyinghead/flycast) compiled to WASM, running as a libretro core inside [EmulatorJS](https://emulatorjs.org). February 2026.
+Flycast compiled to WASM, running as a libretro core inside EmulatorJS. The upstream flyinghead/flycast codebase has been successfully ported using CMake, with an experimental WASM JIT recompiler in active development.
 
-[![Flycast WASM Demo — Dreamcast in the Browser](https://img.youtube.com/vi/VAGoy-kjqYA/maxresdefault.jpg)](https://www.youtube.com/watch?v=VAGoy-kjqYA)
+[![Flycast WASM Demo](https://img.youtube.com/vi/VAGoy-kjqYA/maxresdefault.jpg)](https://www.youtube.com/watch?v=VAGoy-kjqYA)
 
-## Status: Working
+## Status
+
+| Branch | Build | Status |
+|--------|-------|--------|
+| `main` | v1 (libretro/flycast fork) | Stable. Interpreter only. |
+| `upstream-baseline` | Upstream flyinghead/flycast interpreter | Working. Full CMake port. |
+| `upstream-interpreter-benchmark` | Optimized interpreter | Working. +37% throughput via ASYNCIFY_REMOVE. |
+| `wasm-jit` | WASM JIT recompiler | In progress. SH4 blocks compiled to WASM at runtime. |
 
 Games boot with real BIOS, render via WebGL2, and play with full audio.
 
@@ -16,95 +23,127 @@ Games boot with real BIOS, render via WebGL2, and play with full audio.
   <img src="screenshots/shenmue.png" width="32%" alt="Shenmue">
 </p>
 
-Performance is limited by the SH4 interpreter (no dynarec in WASM). See [PERFORMANCE.md](PERFORMANCE.md) for the optimization roadmap.
+## Upstream Port
 
-## Why This Exists
+The upstream [flyinghead/flycast](https://github.com/flyinghead/flycast) maintainer [explicitly declined](https://github.com/flyinghead/flycast/issues/1883) WASM support. EmulatorJS does not list Dreamcast as a supported system. The libretro buildbot does not produce Flycast WASM cores.
 
-Flycast has never officially supported WebAssembly. The upstream maintainer [explicitly declined](https://github.com/flyinghead/flycast/issues/1883) WASM support. EmulatorJS does not list Dreamcast as a supported system. The libretro buildbot does not produce Flycast WASM cores. No prior public build exists.
+This repository contains a working port of the upstream codebase to WebAssembly using CMake and Emscripten. The interpreter-only build is on `upstream-baseline`. An optimized variant with ASYNCIFY_REMOVE (removing Asyncify instrumentation from hot functions) is on `upstream-interpreter-benchmark`.
 
-The deprecated `libretro/flycast` fork has a broken but structurally present Emscripten target. I fixed it. Over 30 bugs were identified and resolved across the Makefile, C/C++ source, Emscripten linker, JavaScript runtime, and EmulatorJS integration.
+### v1 Build (deprecated)
 
-**Read the full technical writeup: [TECHNICAL_WRITEUP.md](TECHNICAL_WRITEUP.md)**
+The original build was based on the deprecated `libretro/flycast` fork, which had a broken but structurally present Emscripten target. Over 30 bugs were fixed across the Makefile, C/C++ source, Emscripten linker, JavaScript runtime, and EmulatorJS integration. See [TECHNICAL_WRITEUP.md](TECHNICAL_WRITEUP.md) for the complete bug reference.
 
-## Quick Start
+The v1 build remains on `main` for reference but is no longer actively developed.
 
-### Use Pre-Built Core
+## WASM JIT
 
-Download `flycast-wasm.data` from [Releases](../../releases) and place it in EmulatorJS's `data/cores/` directory. You'll also need:
+The `wasm-jit` branch contains an experimental dynamic recompiler that compiles SH4 basic blocks to WebAssembly modules at runtime.
 
-- Dreamcast BIOS files (`dc_boot.bin` + `dc_flash.bin`)
-- The [runtime WebGL2 patches](patches/webgl2-compat.js) injected into your emulator page
-- Flycast added to EmulatorJS's `requiresWebGL2` array
+Architecture: SH4 machine code -> Flycast decoder -> SHIL IR -> `rec_wasm.cpp` -> WASM bytecode -> `WebAssembly.compile()` -> dispatch via `call_indirect`
 
-See [Phase 10-11 of the technical writeup](TECHNICAL_WRITEUP.md#phase-10-runtime-webgl2-patches) for integration details.
+Current state:
+- 51 of 70 SHIL ops emitted natively in WASM bytecode
+- Remaining ops fall back to the SHIL interpreter per-op
+- Register caching in WASM locals for hot SH4 registers
+- C dispatch loop with shared function table (no JS in hot path)
+- Production build strips all diagnostic logging
 
-### Build From Source
+## Building
 
-Requires WSL2/Linux and Emscripten SDK 3.1.74. Full instructions in the [technical writeup](TECHNICAL_WRITEUP.md#phase-1-clone-repositories).
+Requires WSL2 or Linux with Emscripten SDK 3.1.74+.
+
+### Upstream build (interpreter)
 
 ```bash
-# Clone
-git clone https://github.com/libretro/flycast.git ~/flycast-wasm/flycast
-cd ~/flycast-wasm/flycast
+# Clone upstream flycast into upstream/source/
+cd upstream/source
+git clone https://github.com/flyinghead/flycast.git .
 
-# Patch (6 source patches across 5 files)
-git apply ../patches/flycast-all-changes.patch
+# Apply patches
+git apply ../patches/wasm-jit-phase1-modified.patch
 
-# Build (~2 min)
-emmake make -f Makefile platform=emscripten -j$(nproc)
-
-# Archive, link with EmulatorJS RetroArch, package as 7z
-# See TECHNICAL_WRITEUP.md Phases 3-9
+# Build and deploy to demo server
+bash upstream/build-and-deploy.sh
 ```
 
-## What I Had to Fix
+### v1 build (deprecated libretro fork)
 
-**6 source patches:**
-1. Makefile — Emscripten platform block (zlib, exceptions, OpenMP, NO_REC, HAVE_GENERIC_JIT)
-2. Makefile — HOST_CPU override (GNU Make `$(filter)` bug with empty variables)
-3. `sh4_core_regs.cpp` — CPU_GENERIC floating-point rounding
-4. `gles.cpp` — Force GLES3 detection (runtime `glGetString` returns garbage in WASM)
-5. `libretro.cpp` — Emscripten-safe `os_DebugBreak` with stack traces
-6. `nullDC.cpp` — Init sequence tracing
+```bash
+git clone https://github.com/libretro/flycast.git ~/flycast-wasm/flycast
+cd ~/flycast-wasm/flycast
+git apply ../patches/flycast-all-changes.patch
+emmake make -f Makefile platform=emscripten -j$(nproc)
+```
 
-**3 runtime JavaScript patches** (critical for gameplay):
-1. `getParameter` override — correct GL_VERSION for WebGL2
-2. `getError` suppression — prevents RetroArch from aborting video init on GL_INVALID_ENUM
-3. `texParameteri/f` guard — prevents console spam that causes massive lag
+See [TECHNICAL_WRITEUP.md](TECHNICAL_WRITEUP.md) for full build instructions.
 
-**Plus:** stub functions for WASM signature mismatches, libchdr FLAC collision workaround, EmulatorJS metadata schema fixes, BIOS path handling, CHD filename fixes, and more.
+### Demo server
 
-The [complete bug reference](TECHNICAL_WRITEUP.md#complete-bug-reference) documents all 32 issues encountered.
+```bash
+node demo/server.js 3000 /path/to/roms
+```
+
+Serves EmulatorJS with cross-origin isolation headers (COEP/COOP) required for SharedArrayBuffer. Supports CHD, CDI, GDI, and CUE/BIN ROM formats.
+
+### Test harness
+
+```bash
+node upstream/flycast-wasm-test.js
+```
+
+Automated Playwright-based testing. Launches a headless browser, boots a ROM, captures screenshots, and writes results to `upstream/test-results.json`.
 
 ## Repository Structure
 
 ```
 flycast-wasm/
-├── README.md                           # This file
-├── TECHNICAL_WRITEUP.md                # Full build guide + all 32 bugs documented
-├── PERFORMANCE.md                      # Optimization roadmap
-├── LICENSE                             # GPLv2
-├── patches/
-│   ├── flycast-all-changes.patch       # Combined source patch (git apply)
-│   ├── gles-force-gles3.patch          # Individual: gles.cpp GLES3 force
-│   ├── gl_override.js                  # Emscripten JS library override
-│   └── webgl2-compat.js               # Runtime WebGL2 compatibility patches
-├── stubs/
-│   ├── flycast_stubs.c                 # WASM signature mismatch stubs (C)
-│   └── flycast_stubs_cpp.cpp           # Dynarec no-op stub (C++)
-├── build/
-│   └── link.sh                         # Emscripten link script
+├── README.md
+├── TECHNICAL_WRITEUP.md              # v1 build guide + 32 bugs documented
+├── PERFORMANCE.md                    # Optimization roadmap (Tier 1-5)
+├── LICENSE                           # GPLv2
+│
+├── upstream/                         # Upstream flyinghead/flycast port
+│   ├── source/                       # Flycast clone (gitignored, recreated from patches)
+│   ├── patches/                      # Canonical source modifications
+│   │   ├── wasm-jit-phase1-modified.patch  # Combined diff against upstream
+│   │   ├── rec_wasm.cpp              # WASM JIT backend
+│   │   ├── wasm_module_builder.h     # WASM binary format builder
+│   │   └── wasm_emit.h              # SHIL -> WASM op emitter
+│   ├── build-and-deploy.sh           # Dev build (with diagnostics)
+│   ├── build-and-deploy-prod.sh      # Production build (logging stripped)
+│   ├── link.sh                       # Emscripten link configuration
+│   └── flycast-wasm-test.js          # Automated test harness
+│
+├── patches/                          # v1 build patches (deprecated)
+│   ├── flycast-all-changes.patch
+│   ├── webgl2-compat.js
+│   └── gl_override.js
+│
 ├── config/
-│   ├── core.json                       # EmulatorJS core metadata
-│   ├── build.json                      # EmulatorJS build metadata
-│   └── dreamcast-core-options.json     # Tuned core options for WASM
+│   ├── dreamcast-core-options.json   # Tuned core options for WASM
+│   ├── core.json                     # EmulatorJS core metadata
+│   └── build.json                    # Build version metadata
+│
 ├── demo/
-│   └── server.js                       # Standalone demo server (Node.js)
-└── screenshots/                        # BIOS boot, gameplay captures
+│   └── server.js                     # Standalone demo server (Node.js)
+│
+├── stubs/                            # v1 WASM signature stubs
+├── build/                            # v1 link script
+├── dist/                             # Backup builds (not in git)
+└── screenshots/
 ```
 
-Pre-built binaries (`flycast_libretro.js`, `flycast_libretro.wasm`, `flycast-wasm.data`) are available in [Releases](../../releases).
+## Performance
+
+| Build | Throughput | Notes |
+|-------|-----------|-------|
+| v1 interpreter (libretro fork) | ~0.4-5 FPS | Baseline, deprecated |
+| Upstream interpreter | ~0.4-5 FPS | CMake port of flyinghead/flycast |
+| Upstream + ASYNCIFY_REMOVE | ~0.5-6.7 FPS | +37% over baseline interpreter |
+| WASM JIT (wasm-jit branch) | 20-40+ FPS | Active development |
+
+See [PERFORMANCE.md](PERFORMANCE.md) for the full optimization roadmap.
 
 ## License
 
-Flycast is licensed under [GPLv2](LICENSE). This project contains patches and build tooling for the [libretro/flycast](https://github.com/libretro/flycast) fork.
+Flycast is licensed under [GPLv2](LICENSE). This repository contains patches and build tooling for [flyinghead/flycast](https://github.com/flyinghead/flycast) and the deprecated [libretro/flycast](https://github.com/libretro/flycast) fork.
