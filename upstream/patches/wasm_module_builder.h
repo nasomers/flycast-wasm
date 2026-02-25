@@ -95,9 +95,28 @@ namespace wop {
 	constexpr u8 f32_sub       = 0x93;
 	constexpr u8 f32_mul       = 0x94;
 	constexpr u8 f32_div       = 0x95;
+	// i64 arithmetic
+	constexpr u8 i64_clz       = 0x79;
+	constexpr u8 i64_add       = 0x7C;
+	constexpr u8 i64_sub       = 0x7D;
+	constexpr u8 i64_mul       = 0x7E;
+	constexpr u8 i64_and       = 0x83;
+	constexpr u8 i64_or        = 0x84;
+	constexpr u8 i64_xor       = 0x85;
+	constexpr u8 i64_shl       = 0x86;
+	constexpr u8 i64_shr_s     = 0x87;
+	constexpr u8 i64_shr_u     = 0x88;
+	constexpr u8 i64_const     = 0x42;
+
+	// f64 ops
 	constexpr u8 f64_add       = 0xA0;
 	constexpr u8 f64_mul       = 0xA2;
+
+	// Conversions
+	constexpr u8 i32_wrap_i64  = 0xA7;
 	constexpr u8 i32_trunc_f32_s = 0xA8;
+	constexpr u8 i64_extend_i32_s = 0xAC;
+	constexpr u8 i64_extend_i32_u = 0xAD;
 	constexpr u8 f32_convert_i32_s = 0xB2;
 	constexpr u8 f64_promote_f32   = 0xBB;
 	constexpr u8 i32_reinterpret_f32 = 0xBC;
@@ -350,6 +369,36 @@ public:
 	void op_f32_sqrt()  { emitByte(wop::f32_sqrt); }
 	void op_f32_eq()    { emitByte(wop::f32_eq); }
 	void op_f32_gt()    { emitByte(wop::f32_gt); }
+
+	// i64 arithmetic
+	void op_i64_add()   { emitByte(wop::i64_add); }
+	void op_i64_sub()   { emitByte(wop::i64_sub); }
+	void op_i64_mul()   { emitByte(wop::i64_mul); }
+	void op_i64_and()   { emitByte(wop::i64_and); }
+	void op_i64_or()    { emitByte(wop::i64_or); }
+	void op_i64_xor()   { emitByte(wop::i64_xor); }
+	void op_i64_shl()   { emitByte(wop::i64_shl); }
+	void op_i64_shr_s() { emitByte(wop::i64_shr_s); }
+	void op_i64_shr_u() { emitByte(wop::i64_shr_u); }
+	void op_i64_const(s64 val) {
+		emitByte(wop::i64_const);
+		// signed LEB128 for i64
+		bool more = true;
+		while (more) {
+			u8 b = val & 0x7F;
+			val >>= 7;
+			if ((val == 0 && (b & 0x40) == 0) || (val == -1 && (b & 0x40) != 0))
+				more = false;
+			else
+				b |= 0x80;
+			bytes.push_back(b);
+		}
+	}
+
+	// i64 conversions
+	void op_i32_wrap_i64()       { emitByte(wop::i32_wrap_i64); }
+	void op_i64_extend_i32_s()   { emitByte(wop::i64_extend_i32_s); }
+	void op_i64_extend_i32_u()   { emitByte(wop::i64_extend_i32_u); }
 
 	// Double (f64) ops — used for fipr/ftrv double-precision accumulation
 	void op_f64_add()            { emitByte(wop::f64_add); }

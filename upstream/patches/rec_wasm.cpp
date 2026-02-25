@@ -1595,11 +1595,13 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	b.beginCodeSection(1);
 	b.beginFuncBody();
 
-	// Locals: 1 temp i32 + N cached register i32s
-	u32 totalExtraLocals = 1 + cache.localCount();
-	u32 lc = totalExtraLocals;
-	u8 lt = WASM_TYPE_I32;
-	b.emitLocals(1, &lc, &lt);
+	// Locals: 5 fixed i32 scratch + N cached register i32s + 1 i64 scratch
+	u32 i32Count = LOCAL_FIXED_I32_COUNT + cache.localCount();
+	u32 i64Count = 1;
+	u32 groupCounts[2] = { i32Count, i64Count };
+	u8 groupTypes[2] = { WASM_TYPE_I32, WASM_TYPE_I64 };
+	b.emitLocals(2, groupCounts, groupTypes);
+	cache._tmp64LocalIdx = 2 + i32Count;  // i64 local after all i32s
 
 	// Prologue: load cached registers from ctx memory into WASM locals
 	for (auto& [offset, entry] : cache.entries) {
@@ -1762,8 +1764,8 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 		pcToIdx[chain[i]->vaddr] = i;
 	}
 
-	// Extra local for dispatch index
-	u32 LOCAL_NEXT_IDX = 3 + cache.localCount();
+	// Extra local for dispatch index (after fixed scratch + cache locals)
+	u32 LOCAL_NEXT_IDX = 2 + LOCAL_FIXED_I32_COUNT + cache.localCount();
 
 	b.emitHeader();
 
@@ -1800,11 +1802,13 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 	b.beginCodeSection(1);
 	b.beginFuncBody();
 
-	// Locals: 1 temp + N cached regs + 1 dispatch index
-	u32 totalExtraLocals = 1 + cache.localCount() + 1;
-	u32 lc = totalExtraLocals;
-	u8 lt = WASM_TYPE_I32;
-	b.emitLocals(1, &lc, &lt);
+	// Locals: 5 fixed i32 scratch + N cached regs + 1 dispatch index + 1 i64 scratch
+	u32 i32Count = LOCAL_FIXED_I32_COUNT + cache.localCount() + 1;
+	u32 i64Count = 1;
+	u32 groupCounts[2] = { i32Count, i64Count };
+	u8 groupTypes[2] = { WASM_TYPE_I32, WASM_TYPE_I64 };
+	b.emitLocals(2, groupCounts, groupTypes);
+	cache._tmp64LocalIdx = 2 + i32Count;  // i64 local after all i32s
 
 	// Prologue: load all cached registers
 	for (auto& [offset, entry] : cache.entries) {

@@ -38,10 +38,17 @@ namespace ctx_off {
 // Local variable indices in the compiled WASM function
 // Local 0 = ctx_ptr (function parameter)
 // Local 1 = ram_base (function parameter — heap offset of Dreamcast main RAM)
-// Local 2 = temp i32 (for intermediate values)
-constexpr u32 LOCAL_CTX = 0;
-constexpr u32 LOCAL_RAM = 1;
-constexpr u32 LOCAL_TMP = 2;
+// Locals 2-6 = scratch i32 (for intermediate values)
+// Local 7+ = register cache i32s
+// After all i32s = 1 i64 scratch (for dual-output ops like adc/mul_u64)
+constexpr u32 LOCAL_CTX  = 0;
+constexpr u32 LOCAL_RAM  = 1;
+constexpr u32 LOCAL_TMP  = 2;
+constexpr u32 LOCAL_TMP2 = 3;  // scratch for ftrv vector save
+constexpr u32 LOCAL_TMP3 = 4;
+constexpr u32 LOCAL_TMP4 = 5;
+constexpr u32 LOCAL_TMP5 = 6;
+constexpr u32 LOCAL_FIXED_I32_COUNT = 5;  // TMP through TMP5
 
 // ============================================================
 // Register Cache — maps Sh4Context offsets to WASM locals
@@ -58,7 +65,7 @@ struct RegCacheEntry {
 
 struct RegCache {
 	std::unordered_map<u32, RegCacheEntry> entries;  // key = ctx offset
-	u32 nextLocal = 3;  // first available (0=ctx, 1=ram, 2=tmp)
+	u32 nextLocal = 2 + LOCAL_FIXED_I32_COUNT;  // first available after params + fixed scratch
 
 	void addOffset(u32 offset) {
 		if (entries.find(offset) == entries.end()) {
@@ -107,7 +114,11 @@ struct RegCache {
 	}
 
 	// Number of allocated cache locals
-	u32 localCount() const { return nextLocal - 3; }
+	u32 localCount() const { return nextLocal - (2 + LOCAL_FIXED_I32_COUNT); }
+
+	// i64 scratch local index (set by compile() after all i32 locals are allocated)
+	u32 _tmp64LocalIdx = 0;
+	u32 tmp64Local() const { return _tmp64LocalIdx; }
 };
 
 // ============================================================
@@ -864,30 +875,83 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 
 	case shop_ftrv: {
 		// 4x4 matrix (rs2) * 4-vector (rs1) → rd
-		// rd == rs1 always (in-place), so we must read all inputs before writing.
-		// Strategy: compute all 4 results using a WASM local for temp storage.
-		// Matrix layout: m[col][row] at moff + (col*4 + row)*4
+		// rd == rs1 always (in-place), so we must save input before writing.
+		// Uses f64 accumulation to match reference interpreter precision.
+		// Matrix layout: innerProduct<4>(fn, fm+col) where stride=4 floats
 		u32 voff = op.rs1.reg_offset();
 		u32 moff = op.rs2.reg_offset();
-		u32 doff = op.rd.reg_offset();
 
-		// Use LOCAL_TMP as scratch for partial results
-		// We need 3 temps: store results 0-2 on stack via locals, write result 3 last
-		// Actually simpler: read all 4 vector elements first into locals
-		// But we only have LOCAL_TMP. Instead: compute & store each row,
-		// but since doff==voff (aliasing), we must save input first.
+		// Save input vector fn[0..3] into scratch locals (aliasing: rd == rs1)
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_load(voff);
+		b.op_i32_reinterpret_f32();
+		b.op_local_set(LOCAL_TMP2);
 
-		// Save v[0..3] to LOCAL_TMP and stack by reading them upfront
-		// We'll use a different approach: compute from last to first won't help
-		// since matrix reads v[j] for all j in each row.
-		// Best approach: use i32 reinterpret to save vector in temp locals.
-		// We don't have extra locals... but we can store results to ctx at
-		// a temporary offset. However, that's fragile.
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_load(voff + 4);
+		b.op_i32_reinterpret_f32();
+		b.op_local_set(LOCAL_TMP3);
 
-		// Simplest correct approach: fall through to shil_fb for ftrv
-		// since it already handles aliasing with temp copy.
-		// The cross-module call cost is acceptable since ftrv is ~16 multiplies.
-		return false;
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_load(voff + 8);
+		b.op_i32_reinterpret_f32();
+		b.op_local_set(LOCAL_TMP4);
+
+		b.op_local_get(LOCAL_CTX);
+		b.op_f32_load(voff + 12);
+		b.op_i32_reinterpret_f32();
+		b.op_local_set(LOCAL_TMP5);
+
+		// Compute 4 dot products: fd[col] = sum_j(fn[j] * fm[j*4 + col])
+		// fm layout: fm[0],fm[1],fm[2],fm[3], fm[4],fm[5],...,fm[15]
+		// innerProduct<4>(fn, fm+col) = fn[0]*fm[col] + fn[1]*fm[4+col] + fn[2]*fm[8+col] + fn[3]*fm[12+col]
+		for (int col = 0; col < 4; col++) {
+			b.op_local_get(LOCAL_CTX);  // base for store
+
+			// Element 0: (f64)fn[0] * (f64)fm[col]
+			b.op_local_get(LOCAL_TMP2);
+			b.op_f32_reinterpret_i32();
+			b.op_f64_promote_f32();
+			b.op_local_get(LOCAL_CTX);
+			b.op_f32_load(moff + col * 4);
+			b.op_f64_promote_f32();
+			b.op_f64_mul();
+
+			// Element 1: + (f64)fn[1] * (f64)fm[4+col]
+			b.op_local_get(LOCAL_TMP3);
+			b.op_f32_reinterpret_i32();
+			b.op_f64_promote_f32();
+			b.op_local_get(LOCAL_CTX);
+			b.op_f32_load(moff + (4 + col) * 4);
+			b.op_f64_promote_f32();
+			b.op_f64_mul();
+			b.op_f64_add();
+
+			// Element 2: + (f64)fn[2] * (f64)fm[8+col]
+			b.op_local_get(LOCAL_TMP4);
+			b.op_f32_reinterpret_i32();
+			b.op_f64_promote_f32();
+			b.op_local_get(LOCAL_CTX);
+			b.op_f32_load(moff + (8 + col) * 4);
+			b.op_f64_promote_f32();
+			b.op_f64_mul();
+			b.op_f64_add();
+
+			// Element 3: + (f64)fn[3] * (f64)fm[12+col]
+			b.op_local_get(LOCAL_TMP5);
+			b.op_f32_reinterpret_i32();
+			b.op_f64_promote_f32();
+			b.op_local_get(LOCAL_CTX);
+			b.op_f32_load(moff + (12 + col) * 4);
+			b.op_f64_promote_f32();
+			b.op_f64_mul();
+			b.op_f64_add();
+
+			// Demote to f32 and store
+			b.op_f32_demote_f64();
+			b.op_f32_store(voff + col * 4);
+		}
+		return true;
 	}
 
 	case shop_frswap: {
@@ -1004,6 +1068,222 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 			b.op_i32_store(dstOff + 4);
 			return true;
 		}
+		return false;
+
+	// ---- Dual-output ops (rd + rd2) using i64 scratch ----
+
+	case shop_adc: {
+		// u64 res = (u64)rs1 + rs2 + rs3(carry); rd = low32, rd2 = high32
+		u32 t64 = cache.tmp64Local();
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		b.op_i64_extend_i32_u();
+		emitLoadParamCached(b, op.rs2, cache);
+		b.op_i64_extend_i32_u();
+		b.op_i64_add();
+		emitLoadParamCached(b, op.rs3, cache);
+		b.op_i64_extend_i32_u();
+		b.op_i64_add();
+		b.op_local_tee(t64);
+		b.op_i32_wrap_i64();
+		emitPostStore(b, op.rd, cache);
+
+		emitPreStore(b, op.rd2, cache);
+		b.op_local_get(t64);
+		b.op_i64_const(32);
+		b.op_i64_shr_u();
+		b.op_i32_wrap_i64();
+		emitPostStore(b, op.rd2, cache);
+		return true;
+	}
+
+	case shop_sbc: {
+		// u64 res = (u64)rs1 - rs2 - rs3(carry); rd = low32, rd2 = (res>>32)&1
+		u32 t64 = cache.tmp64Local();
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		b.op_i64_extend_i32_u();
+		emitLoadParamCached(b, op.rs2, cache);
+		b.op_i64_extend_i32_u();
+		b.op_i64_sub();
+		emitLoadParamCached(b, op.rs3, cache);
+		b.op_i64_extend_i32_u();
+		b.op_i64_sub();
+		b.op_local_tee(t64);
+		b.op_i32_wrap_i64();
+		emitPostStore(b, op.rd, cache);
+
+		emitPreStore(b, op.rd2, cache);
+		b.op_local_get(t64);
+		b.op_i64_const(32);
+		b.op_i64_shr_u();
+		b.op_i32_wrap_i64();
+		b.op_i32_const(1);
+		b.op_i32_and();
+		emitPostStore(b, op.rd2, cache);
+		return true;
+	}
+
+	case shop_negc: {
+		// u64 res = -(u64)rs1 - rs2(carry); rd = low32, rd2 = (res>>32)&1
+		u32 t64 = cache.tmp64Local();
+		emitPreStore(b, op.rd, cache);
+		b.op_i64_const(0);
+		emitLoadParamCached(b, op.rs1, cache);
+		b.op_i64_extend_i32_u();
+		b.op_i64_sub();
+		emitLoadParamCached(b, op.rs2, cache);
+		b.op_i64_extend_i32_u();
+		b.op_i64_sub();
+		b.op_local_tee(t64);
+		b.op_i32_wrap_i64();
+		emitPostStore(b, op.rd, cache);
+
+		emitPreStore(b, op.rd2, cache);
+		b.op_local_get(t64);
+		b.op_i64_const(32);
+		b.op_i64_shr_u();
+		b.op_i32_wrap_i64();
+		b.op_i32_const(1);
+		b.op_i32_and();
+		emitPostStore(b, op.rd2, cache);
+		return true;
+	}
+
+	case shop_rocl: {
+		// rd = (rs1 << 1) | rs2; rd2 = rs1 >> 31
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		b.op_i32_const(1);
+		b.op_i32_shl();
+		emitLoadParamCached(b, op.rs2, cache);
+		b.op_i32_or();
+		emitPostStore(b, op.rd, cache);
+
+		emitPreStore(b, op.rd2, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		b.op_i32_const(31);
+		b.op_i32_shr_u();
+		emitPostStore(b, op.rd2, cache);
+		return true;
+	}
+
+	case shop_rocr: {
+		// rd = (rs1 >> 1) | (rs2 << 31); rd2 = rs1 & 1
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		b.op_i32_const(1);
+		b.op_i32_shr_u();
+		emitLoadParamCached(b, op.rs2, cache);
+		b.op_i32_const(31);
+		b.op_i32_shl();
+		b.op_i32_or();
+		emitPostStore(b, op.rd, cache);
+
+		emitPreStore(b, op.rd2, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		b.op_i32_const(1);
+		b.op_i32_and();
+		emitPostStore(b, op.rd2, cache);
+		return true;
+	}
+
+	case shop_mul_u64: {
+		// u64 res = (u64)(u32)rs1 * (u32)rs2; rd = low32, rd2 = high32
+		u32 t64 = cache.tmp64Local();
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		b.op_i64_extend_i32_u();
+		emitLoadParamCached(b, op.rs2, cache);
+		b.op_i64_extend_i32_u();
+		b.op_i64_mul();
+		b.op_local_tee(t64);
+		b.op_i32_wrap_i64();
+		emitPostStore(b, op.rd, cache);
+
+		emitPreStore(b, op.rd2, cache);
+		b.op_local_get(t64);
+		b.op_i64_const(32);
+		b.op_i64_shr_u();
+		b.op_i32_wrap_i64();
+		emitPostStore(b, op.rd2, cache);
+		return true;
+	}
+
+	case shop_mul_s64: {
+		// s64 res = (s64)(s32)rs1 * (s32)rs2; rd = low32, rd2 = high32
+		u32 t64 = cache.tmp64Local();
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		b.op_i64_extend_i32_s();
+		emitLoadParamCached(b, op.rs2, cache);
+		b.op_i64_extend_i32_s();
+		b.op_i64_mul();
+		b.op_local_tee(t64);
+		b.op_i32_wrap_i64();
+		emitPostStore(b, op.rd, cache);
+
+		emitPreStore(b, op.rd2, cache);
+		b.op_local_get(t64);
+		b.op_i64_const(32);
+		b.op_i64_shr_u();
+		b.op_i32_wrap_i64();
+		emitPostStore(b, op.rd2, cache);
+		return true;
+	}
+
+	// ---- Byte comparison ----
+
+	case shop_setpeq: {
+		// rd = 1 if any byte of (rs1 ^ rs2) is zero, else 0
+		emitPreStore(b, op.rd, cache);
+		emitLoadParamCached(b, op.rs1, cache);
+		emitLoadParamCached(b, op.rs2, cache);
+		b.op_i32_xor();
+		b.op_local_tee(LOCAL_TMP);
+
+		// byte0 == 0?
+		b.op_i32_const(0xFF);
+		b.op_i32_and();
+		b.op_i32_eqz();
+
+		// byte1 == 0?
+		b.op_local_get(LOCAL_TMP);
+		b.op_i32_const(8);
+		b.op_i32_shr_u();
+		b.op_i32_const(0xFF);
+		b.op_i32_and();
+		b.op_i32_eqz();
+		b.op_i32_or();
+
+		// byte2 == 0?
+		b.op_local_get(LOCAL_TMP);
+		b.op_i32_const(16);
+		b.op_i32_shr_u();
+		b.op_i32_const(0xFF);
+		b.op_i32_and();
+		b.op_i32_eqz();
+		b.op_i32_or();
+
+		// byte3 == 0?
+		b.op_local_get(LOCAL_TMP);
+		b.op_i32_const(24);
+		b.op_i32_shr_u();
+		b.op_i32_eqz();
+		b.op_i32_or();
+
+		emitPostStore(b, op.rd, cache);
+		return true;
+	}
+
+	// ---- Division ops (complex, kept as shil_fb fallback) ----
+	// div32u/div32s need 64-bit division with dual output
+	// div1 needs sr.Q/sr.M bit access, div32p2 has complex conditionals
+	// These are relatively rare compared to ALU/FPU/memory ops
+	case shop_div32u:
+	case shop_div32s:
+	case shop_div32p2:
+	case shop_div1:
 		return false;
 
 	// ---- System ops that need fallback (flush+reload around call) ----
