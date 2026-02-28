@@ -820,7 +820,7 @@ index 63fe0a4..2c3208a 100644
  
  	audio_buffer[audio_buffer_idx++] = l;
 diff --git a/shell/libretro/libretro.cpp b/shell/libretro/libretro.cpp
-index 9dcc6b3..08a2d1a 100644
+index 9dcc6b3..e08ec78 100644
 --- a/shell/libretro/libretro.cpp
 +++ b/shell/libretro/libretro.cpp
 @@ -18,6 +18,9 @@
@@ -856,7 +856,7 @@ index 9dcc6b3..08a2d1a 100644
  	if (!first_startup)
  	{
  		if (wasThreadedRendering != config::ThreadedRendering)
-@@ -1198,6 +1210,121 @@ static void update_variables(bool first_startup)
+@@ -1198,6 +1210,125 @@ static void update_variables(bool first_startup)
  
  void retro_run()
  {
@@ -908,10 +908,14 @@ index 9dcc6b3..08a2d1a 100644
 +
 +			pi_adjust_ms = Kp * error + Ki * pi_integral;
 +			if (pi_adjust_ms > max_adjust) pi_adjust_ms = max_adjust;
-+			if (pi_adjust_ms < -max_adjust) pi_adjust_ms = -max_adjust;
++			// Only allow positive adjustment (slow down). Never speed up
++			// past native DC rate — overspeed is worse than slight underspeed.
++			if (pi_adjust_ms < 0) pi_adjust_ms = 0;
 +		}
 +
 +		double target_ms = nominal_ms + pi_adjust_ms;
++		// Never run faster than native DC speed — PI can only slow down
++		if (target_ms < nominal_ms) target_ms = nominal_ms;
 +
 +		double now = emscripten_get_now();
 +		double elapsed = (prev_time > 0) ? (now - prev_time) : 0;
@@ -919,11 +923,11 @@ index 9dcc6b3..08a2d1a 100644
 +
 +		accumulator += elapsed;
 +
-+		// Spiral protection: if we've fallen behind by more than 3 frames,
-+		// clamp to 2 frames of catch-up and reset integral
-+		double max_accumulator = target_ms * 3.0;
-+		if (accumulator > max_accumulator) {
-+			accumulator = target_ms * 2.0;
++		// Spiral protection: if we've fallen behind by more than 1 frame,
++		// clamp to 1 frame of catch-up and reset integral.
++		// Allowing >1 frame catch-up causes visible overspeed bursts.
++		if (accumulator > target_ms * 2.0) {
++			accumulator = target_ms;
 +			pi_integral = 0;
 +		}
 +
@@ -978,7 +982,7 @@ index 9dcc6b3..08a2d1a 100644
  	bool updated = false;
  	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
  		update_variables(false);
-@@ -1275,6 +1402,22 @@ void retro_run()
+@@ -1275,6 +1406,22 @@ void retro_run()
  		environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avinfo);
  	}
  
@@ -1001,7 +1005,7 @@ index 9dcc6b3..08a2d1a 100644
  	video_cb(is_dupe ? 0 : RETRO_HW_FRAME_BUFFER_VALID, framebufferWidth, framebufferHeight, 0);
  
  	if (!config::ThreadedRendering || config::LimitFPS)
-@@ -3579,24 +3722,30 @@ static void retro_keyboard_event(bool down, unsigned keycode, uint32_t character
+@@ -3579,24 +3726,30 @@ static void retro_keyboard_event(bool down, unsigned keycode, uint32_t character
  
  void fatal_error(const char* text, ...)
  {

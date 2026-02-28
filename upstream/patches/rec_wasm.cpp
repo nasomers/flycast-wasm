@@ -2069,8 +2069,9 @@ public:
 		if (codeBuffer->getFreeSpace() >= 4)
 			codeBuffer->advance(4);
 
-#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
-		if (compiledCount <= 10 || (compiledCount % 200 == 0)) {
+#if defined(__EMSCRIPTEN__)
+		// Always log first few compilations + periodic updates (even in prod)
+		if (compiledCount <= 5 || (compiledCount % 500 == 0)) {
 			EM_ASM({ console.log('[rec_wasm] compiled=' + $0 + ' fail=' + $1 +
 				' pc=0x' + ($2>>>0).toString(16) + ' ops=' + $3); },
 				compiledCount, failCount, block->vaddr,
@@ -2087,10 +2088,10 @@ public:
 
 		// (per-frame cache flush removed — stale block theory disproven)
 
-#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
+#if defined(__EMSCRIPTEN__)
 		static int mainloop_count = 0;
 		mainloop_count++;
-		if (mainloop_count <= 5) {
+		if (mainloop_count <= 3) {
 			EM_ASM({ console.log('[rec_wasm] mainloop #' + $0 + ' cache=' + $1); },
 				mainloop_count, wasm_cache_size());
 		}
@@ -2295,15 +2296,16 @@ public:
 					// Invalidate the block at current PC and fall back to interpreter.
 					u32 trap_pc = sh4ctx->pc;
 					u32 trap_key = (trap_pc >> 1) & JIT_TABLE_MASK;
-#ifndef JIT_PROD_BUILD
+					// ALWAYS log traps (even in prod) — critical for debugging
 					static u32 trap_log_count = 0;
-					if (trap_log_count < 50) {
-						trap_log_count++;
-						EM_ASM({ console.log('[JIT-TRAP] pc=0x' + ($0>>>0).toString(16) +
-							' key=' + $1 + ' — invalidating block, falling back to interpreter'); },
-							trap_pc, trap_key);
+					trap_log_count++;
+					if (trap_log_count <= 100) {
+						EM_ASM({ console.error('[JIT-TRAP #' + $0 + '] pc=0x' + ($1>>>0).toString(16) +
+							' key=' + $2 + ' — invalidating block, falling back to interpreter'); },
+							trap_log_count, trap_pc, trap_key);
+					} else if (trap_log_count == 101) {
+						EM_ASM({ console.error('[JIT-TRAP] suppressing further trap logs (100+ traps!)'); });
 					}
-#endif
 					// Evict from dispatch table
 					jit_dispatch_table[trap_key] = 0;
 					jit_dispatch_pc[trap_key] = 0;

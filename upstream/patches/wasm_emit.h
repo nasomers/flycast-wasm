@@ -1152,6 +1152,13 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 
 	case shop_rocl: {
 		// rd = (rs1 << 1) | rs2; rd2 = rs1 >> 31
+		// IMPORTANT: rd == rs1 (both are Rn), so save rs1 bit 31 BEFORE
+		// writing rd, otherwise rd2 reads the already-shifted value.
+		emitLoadParamCached(b, op.rs1, cache);
+		b.op_i32_const(31);
+		b.op_i32_shr_u();
+		b.op_local_set(LOCAL_TMP);  // save original rs1 >> 31
+
 		emitPreStore(b, op.rd, cache);
 		emitLoadParamCached(b, op.rs1, cache);
 		b.op_i32_const(1);
@@ -1161,15 +1168,20 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 		emitPostStore(b, op.rd, cache);
 
 		emitPreStore(b, op.rd2, cache);
-		emitLoadParamCached(b, op.rs1, cache);
-		b.op_i32_const(31);
-		b.op_i32_shr_u();
+		b.op_local_get(LOCAL_TMP);
 		emitPostStore(b, op.rd2, cache);
 		return true;
 	}
 
 	case shop_rocr: {
 		// rd = (rs1 >> 1) | (rs2 << 31); rd2 = rs1 & 1
+		// IMPORTANT: rd == rs1 (both are Rn), so save rs1 bit 0 BEFORE
+		// writing rd, otherwise rd2 reads the already-shifted value.
+		emitLoadParamCached(b, op.rs1, cache);
+		b.op_i32_const(1);
+		b.op_i32_and();
+		b.op_local_set(LOCAL_TMP);  // save original rs1 & 1
+
 		emitPreStore(b, op.rd, cache);
 		emitLoadParamCached(b, op.rs1, cache);
 		b.op_i32_const(1);
@@ -1181,9 +1193,7 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 		emitPostStore(b, op.rd, cache);
 
 		emitPreStore(b, op.rd2, cache);
-		emitLoadParamCached(b, op.rs1, cache);
-		b.op_i32_const(1);
-		b.op_i32_and();
+		b.op_local_get(LOCAL_TMP);
 		emitPostStore(b, op.rd2, cache);
 		return true;
 	}
