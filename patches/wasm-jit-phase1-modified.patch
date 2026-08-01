@@ -1,0 +1,3075 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 878b5d5..7496f4e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -186,60 +186,88 @@ if(NINTENDO_SWITCH)
+ 		IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
+ 
+ elseif(LIBRETRO)
+-	add_library(${PROJECT_NAME} SHARED core/emulator.cpp)
+-	if(APPLE)
+-		if(NOT IOS)
+-			set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-undefined,error")
+-		endif()
+-		set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/shell/libretro/libretro.osx.def")
++	if(EMSCRIPTEN)
++		# Emscripten: static library (object files archived later for linking with EmulatorJS RetroArch)
++		add_library(${PROJECT_NAME} STATIC core/emulator.cpp)
++		target_compile_definitions(${PROJECT_NAME} PRIVATE
++			LIBRETRO
++			GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3 HAVE_OIT)
++		target_compile_options(${PROJECT_NAME} PRIVATE -fexceptions)
++		set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "flycast_libretro_emscripten")
++		# Disable features incompatible with WASM
++		set(USE_VULKAN OFF CACHE BOOL "Force vulkan off" FORCE)
++		set(USE_DX9 OFF CACHE BOOL "Force DX9 off" FORCE)
++		set(USE_DX11 OFF CACHE BOOL "Force DX11 off" FORCE)
++		set(USE_OPENMP OFF CACHE BOOL "Force OpenMP off" FORCE)
++		set(USE_BREAKPAD OFF CACHE BOOL "Force breakpad off" FORCE)
++		set(USE_LUA OFF CACHE BOOL "Force Lua off" FORCE)
++		set(USE_DISCORD OFF CACHE BOOL "Force Discord off" FORCE)
++		# Use GLES3 path for GL symbol loading
++		set(USE_GLES ON CACHE BOOL "Force GLES for Emscripten" FORCE)
++		# asio: disable threads (WASM is single-threaded)
++		target_compile_definitions(${PROJECT_NAME} PRIVATE
++			ASIO_DISABLE_THREADS
++			ASIO_DISABLE_LOCAL_SOCKETS
++			ASIO_DISABLE_SERIAL_PORT)
+ 	else()
+-		if(NOT CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
+-			set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
+-		endif()
+-	endif()
+-	set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "flycast_libretro"
+-	  XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
+-	  XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
+-    )
+-	set(CMAKE_SHARED_LIBRARY_PREFIX "")
+-	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+-	target_compile_definitions(${PROJECT_NAME} PRIVATE LIBRETRO)
+-	if(APPLE)
+-		find_library(FOUNDATION Foundation)
+-		target_link_libraries(${PROJECT_NAME} PRIVATE ${FOUNDATION})
+-	endif()
+-	if(ANDROID OR USE_GLES)
+-		target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3 HAVE_OIT)
+-    elseif(IOS)
+-		target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3)
+-		find_library(OPENGLES OpenGLES)
+-		find_library(GLKIT GLKit)
+-		target_link_libraries(${PROJECT_NAME} PRIVATE ${OPENGLES} ${GLKIT})
+-	elseif(USE_GLES2)
+-		target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES2 HAVE_OPENGLES HAVE_OPENGLES2)
+-		if(USE_VIDEOCORE)
+-			target_compile_definitions(${PROJECT_NAME} PRIVATE TARGET_NO_STENCIL)
+-			target_link_libraries(${PROJECT_NAME} PRIVATE "-lbrcmGLESv2")
+-			target_link_directories(${PROJECT_NAME} PRIVATE "/opt/vc/lib")
++		add_library(${PROJECT_NAME} SHARED core/emulator.cpp)
++		if(APPLE)
++			if(NOT IOS)
++				set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-undefined,error")
++			endif()
++			set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/shell/libretro/libretro.osx.def")
+ 		else()
+-			target_link_libraries(${PROJECT_NAME} PRIVATE "-lGLESv2")
+-		endif()
+-	elseif(USE_OPENGL)
+-		if (CMAKE_SYSTEM_NAME MATCHES "FreeBSD|OpenBSD|NetBSD")
+-			find_package(OpenGL REQUIRED)
+-			if(CMAKE_VERSION VERSION_LESS 3.29.0)
+-				target_include_directories(${PROJECT_NAME} PRIVATE ${OPENGL_INCLUDE_DIR})
+-			else()
+-				target_include_directories(${PROJECT_NAME} PRIVATE ${OPENGL_INCLUDE_DIRS})
++			if(NOT CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
++				set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
+ 			endif()
+ 		endif()
+-		target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_OPENGL)
++		set(CMAKE_SHARED_LIBRARY_PREFIX "")
++		target_compile_definitions(${PROJECT_NAME} PRIVATE LIBRETRO)
+ 		if(APPLE)
+-			set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-framework,OpenGL")
+-		else()
+-			target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_OIT)
++			find_library(FOUNDATION Foundation)
++			target_link_libraries(${PROJECT_NAME} PRIVATE ${FOUNDATION})
+ 		endif()
++		if(ANDROID OR USE_GLES)
++			target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3 HAVE_OIT)
++		elseif(IOS)
++			target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3 HAVE_OPENGLES HAVE_OPENGLES3)
++			find_library(OPENGLES OpenGLES)
++			find_library(GLKIT GLKit)
++			target_link_libraries(${PROJECT_NAME} PRIVATE ${OPENGLES} ${GLKIT})
++		elseif(USE_GLES2)
++			target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES2 HAVE_OPENGLES HAVE_OPENGLES2)
++			if(USE_VIDEOCORE)
++				target_compile_definitions(${PROJECT_NAME} PRIVATE TARGET_NO_STENCIL)
++				target_link_libraries(${PROJECT_NAME} PRIVATE "-lbrcmGLESv2")
++				target_link_directories(${PROJECT_NAME} PRIVATE "/opt/vc/lib")
++			else()
++				target_link_libraries(${PROJECT_NAME} PRIVATE "-lGLESv2")
++			endif()
++		elseif(USE_OPENGL)
++			if (CMAKE_SYSTEM_NAME MATCHES "FreeBSD|OpenBSD|NetBSD")
++				find_package(OpenGL REQUIRED)
++				if(CMAKE_VERSION VERSION_LESS 3.29.0)
++					target_include_directories(${PROJECT_NAME} PRIVATE ${OPENGL_INCLUDE_DIR})
++				else()
++					target_include_directories(${PROJECT_NAME} PRIVATE ${OPENGL_INCLUDE_DIRS})
++				endif()
++			endif()
++			target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_OPENGL)
++			if(APPLE)
++				set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-framework,OpenGL")
++			else()
++				target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_OIT)
++			endif()
++		endif()
++	endif()
++	if(NOT EMSCRIPTEN)
++		set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "flycast_libretro"
++		  XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
++		  XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
++		)
++		set(CMAKE_SHARED_LIBRARY_PREFIX "")
+ 	endif()
++	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+ elseif(ANDROID)
+ 	add_library(${PROJECT_NAME} SHARED core/emulator.cpp)
+ 	set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_RELEASE} -O3")
+@@ -1333,7 +1361,9 @@ if("x86" IN_LIST ARCHITECTURE OR "x86_64" IN_LIST ARCHITECTURE)
+ 			core/rec-x64/x64_regalloc.h)
+ 	endif()
+ endif()
+-
++if(EMSCRIPTEN)
++	target_sources(${PROJECT_NAME} PRIVATE core/rec-wasm/rec_wasm.cpp)
++endif()
+ if((USE_OPENGL OR USE_GLES2 OR USE_GLES) AND NOT LIBRETRO)
+ 	add_library(glad STATIC core/deps/glad/src/gl.c)
+ 	if(NOT APPLE AND NOT WIN32 AND NOT SDL2_FOUND)
+diff --git a/core/build.h b/core/build.h
+index 6ea5355..07c7738 100755
+--- a/core/build.h
++++ b/core/build.h
+@@ -17,6 +17,7 @@
+ #define CPU_ARM      0x20000002
+ #define CPU_ARM64    0x20000003
+ #define CPU_X64      0x20000004
++#define CPU_GENERIC  0x20000005
+ 
+ //FEAT_SHREC, FEAT_AREC, FEAT_DSPREC
+ #define DYNAREC_NONE	0x40000001
+@@ -24,7 +25,13 @@
+ 
+ //automatic
+ 
+-#if defined(__x86_64__) || defined(_M_X64)
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	#define HOST_CPU CPU_GENERIC
++	// WASM JIT backend
++	#define FEAT_SHREC DYNAREC_JIT
++	#define FEAT_AREC DYNAREC_NONE
++	#define FEAT_DSPREC DYNAREC_NONE
++#elif defined(__x86_64__) || defined(_M_X64)
+ 	#define HOST_CPU CPU_X64
+ #elif defined(__i386__) || defined(_M_IX86)
+ 	#define HOST_CPU CPU_X86
+@@ -48,7 +55,7 @@
+ #endif
+ 
+ #if defined(TARGET_NO_REC)
+-#define FEAT_SHREC DYNAREC_NONE
++#define FEAT_SHREC DYNAREC_JIT
+ #define FEAT_AREC DYNAREC_NONE
+ #define FEAT_DSPREC DYNAREC_NONE
+ #endif
+@@ -69,7 +76,7 @@
+ 	#if HOST_CPU == CPU_ARM || HOST_CPU == CPU_ARM64 || HOST_CPU == CPU_X86 || HOST_CPU == CPU_X64
+ 		#define FEAT_SHREC DYNAREC_JIT
+ 	#else
+-		#define FEAT_SHREC DYNAREC_NONE
++		#define FEAT_SHREC DYNAREC_JIT
+ 	#endif
+ #endif
+ 
+diff --git a/core/deps/DreamPicoPort-API b/core/deps/DreamPicoPort-API
+--- a/core/deps/DreamPicoPort-API
++++ b/core/deps/DreamPicoPort-API
+@@ -1 +1 @@
+-Subproject commit e06d9f6c59833fc7bb7f2a33c960614489811ef8
++Subproject commit e06d9f6c59833fc7bb7f2a33c960614489811ef8-dirty
+diff --git a/core/deps/SDL b/core/deps/SDL
+--- a/core/deps/SDL
++++ b/core/deps/SDL
+@@ -1 +1 @@
+-Subproject commit 00d4f1c2c4ad2dc95d26b18743541f57b1dca56d
++Subproject commit 00d4f1c2c4ad2dc95d26b18743541f57b1dca56d-dirty
+diff --git a/core/emulator.cpp b/core/emulator.cpp
+index 232702f..0b8931e 100644
+--- a/core/emulator.cpp
++++ b/core/emulator.cpp
+@@ -1079,7 +1079,23 @@ void Emulator::vblank()
+ 	EventManager::event(Event::VBlank);
+ 	runner.execTasks();
+ 	// Time out if a frame hasn't been rendered for 50 ms
+-	if (sh4_sched_now64() - startTime <= 10000000)
++#ifdef __EMSCRIPTEN__
++	// ★ PACER-SPREAD (2026-07-24): stop a render-less run at the SECOND vblank
++	// (~33ms guest), not the third (50ms). Transitions skip ~3 vblanks without
++	// presenting; at the upstream threshold one emu.render() gulps 50ms of
++	// guest time inside a single host frame (the [SPIKE2] guest_ms=50.0
++	// signature) and the wall cost lands as a 60-220ms hitch. Returning the
++	// host frame earlier lets unpaid debt carry in fly_owed and drain across
++	// the next ticks as brief slowmo instead of a freeze. Threshold grid is
++	// discrete (check runs only at vblanks): <=1.5 vblanks selects stop-at-#2.
++	// 30fps-native titles present from the vblank-#2 ISR, which runs AFTER
++	// this callback — they now dupe at #2 and present at the top of the next
++	// tick; JGR feel-check is the eyes gate for that.
++	const u64 fly_render_timeout_cycles = 5000000;
++#else
++	const u64 fly_render_timeout_cycles = 10000000;
++#endif
++	if (sh4_sched_now64() - startTime <= fly_render_timeout_cycles)
+ 		return;
+ 	renderTimeout = true;
+ 	if (ggpo::active())
+diff --git a/core/hw/aica/aica.cpp b/core/hw/aica/aica.cpp
+index 18b440f..01470f4 100644
+--- a/core/hw/aica/aica.cpp
++++ b/core/hw/aica/aica.cpp
+@@ -7,6 +7,9 @@
+ #include "hw/sh4/sh4_sched.h"
+ #include "hw/arm7/arm7.h"
+ #include "hw/arm7/arm_mem.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ 
+ namespace aica
+ {
+@@ -86,7 +89,16 @@ constexpr int AICA_TICK = 4535;		// 44.1 KHz
+ 
+ static int AicaUpdate(int tag, int cycles, int jitter, void *arg)
+ {
++#ifdef __EMSCRIPTEN__
++	// Render-phase timer [5]: ARM7 interpreter slice (fires at 44.1kHz —
++	// get_now pairs add ~1-2% skew; diagnostic-grade, not verdict-grade).
++	extern double g_fly_rp[10];
++	double fly_t0 = emscripten_get_now();
+ 	arm::run(1);
++	g_fly_rp[5] += emscripten_get_now() - fly_t0;
++#else
++	arm::run(1);
++#endif
+ 
+ 	return AICA_TICK;
+ }
+@@ -95,6 +107,10 @@ static int AicaUpdate(int tag, int cycles, int jitter, void *arg)
+ 
+ void timeStep()
+ {
++#ifdef __EMSCRIPTEN__
++	extern double g_fly_rp[10];
++	double fly_t0 = emscripten_get_now();
++#endif
+ 	for (auto& timer : timers)
+ 		timer.StepTimer(1);
+ 
+@@ -105,7 +121,10 @@ void timeStep()
+ 
+ 	//Make sure sh4/arm interrupt system is up to date
+ 	update_arm_interrupts();
+-	UpdateSh4Ints();	
++	UpdateSh4Ints();
++#ifdef __EMSCRIPTEN__
++	g_fly_rp[5] += emscripten_get_now() - fly_t0;
++#endif
+ }
+ 
+ static void AicaInternalDMA()
+diff --git a/core/hw/holly/holly_intc.cpp b/core/hw/holly/holly_intc.cpp
+index a6d5946..cea15fd 100644
+--- a/core/hw/holly/holly_intc.cpp
++++ b/core/hw/holly/holly_intc.cpp
+@@ -38,8 +38,48 @@ static void asic_RL2Pending()
+ 	InterruptPend(sh4_IRL_13, t1 || t2 || t3 || t4);
+ }
+ 
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++#include <emscripten.h>
++extern "C" {
++u32 g_fly_asic_total = 0;        // every asic_RaiseInterrupt call
++u32 g_fly_asic_vblank_in = 0;    // holly_SCANINT1 = 0x0003
++u32 g_fly_asic_vblank_out = 0;   // holly_SCANINT2 = 0x0004
++u32 g_fly_asic_hblank = 0;       // holly_HBLank = 0x0005
++u32 g_fly_asic_maple = 0;        // holly_MAPLE_DMA = 0x0012
++// Full per-ID histogram: index = (type << 5) | bit, type 0=NRM 1=EXT 2=ERR.
++// For the JGR interrupt-storm hunt: production raises ASIC interrupts at up
++// to ~360/vblank (clean: 10-14) — this identifies WHICH interrupt storms.
++u32 g_fly_asic_by_id[96];
++u32 EMSCRIPTEN_KEEPALIVE fly_asic_hist_ptr() { return (u32)(uintptr_t)g_fly_asic_by_id; }
++u32 EMSCRIPTEN_KEEPALIVE fly_asic_hist_len() { return 96; }
++// Raise-vs-ack accounting (dropped-delivery hunt, 2026-06-12): if the game's
++// ISR misses a CH2-DMA-end delivery, its display-list append pointer never
++// resets and lists accumulate — the observed storm shape. An "ack" = the game
++// write-clearing an ISTNRM bit that was SET (it saw + handled the interrupt).
++// "clears(unset)" = write-clearing an already-clear bit (double delivery).
++// [0] CH2 raises [1] CH2 acks(set) [2] CH2 clears(unset)
++// [3] OPQ raises [4] OPQ acks(set) [5] OPQ clears(unset)
++// [6] ISTNRM reads seeing CH2 set [7] reads seeing OPQ set
++u32 g_fly_ack[8];
++u32 EMSCRIPTEN_KEEPALIVE fly_ack_ptr() { return (u32)(uintptr_t)g_fly_ack; }
++u32 EMSCRIPTEN_KEEPALIVE fly_ack_len() { return 8; }
++}
++#endif
++
+ void asic_RaiseInterrupt(HollyInterruptID inter)
+ {
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	g_fly_asic_total++;
++	g_fly_asic_by_id[(((u32)inter >> 8) << 5) | ((u32)inter & 31)]++;
++	if ((u32)inter == 0x0013) g_fly_ack[0]++;       // CH2-DMA-end raise
++	else if ((u32)inter == 0x0007) g_fly_ack[3]++;  // opaque-EOL raise
++	switch ((u32)inter) {
++	case 0x0003: g_fly_asic_vblank_in++;  break;
++	case 0x0004: g_fly_asic_vblank_out++; break;
++	case 0x0005: g_fly_asic_hblank++;     break;
++	case 0x0012: g_fly_asic_maple++;      break;
++	}
++#endif
+ 	u8 type = inter >> 8;
+ 	u32 mask = 1 << (u8)inter;
+ 	switch(type)
+@@ -89,6 +129,13 @@ static u32 Read_SB_ISTNRM(u32 addr)
+ 	 * SB_ISTEXT and SB_ISTERR, respectively,
+ 	 * and writes to these two bits are ignored. */
+ 	u32 tmp = (Naomi2 && (addr & 0x02000000) != 0 ? SB_ISTNRM1 : SB_ISTNRM) & 0x3FFFFFFF;
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	{
++		extern u32 g_fly_ack[8];
++		if (tmp & (1u << 19)) g_fly_ack[6]++;
++		if (tmp & (1u << 7))  g_fly_ack[7]++;
++	}
++#endif
+ 
+ 	if (SB_ISTEXT)
+ 		tmp|=0x40000000;
+@@ -102,6 +149,13 @@ static u32 Read_SB_ISTNRM(u32 addr)
+ template<bool Naomi2>
+ static void Write_SB_ISTNRM(u32 addr, u32 data)
+ {
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	{
++		extern u32 g_fly_ack[8];
++		if (data & (1u << 19)) ((SB_ISTNRM & (1u << 19)) ? g_fly_ack[1] : g_fly_ack[2])++;
++		if (data & (1u << 7))  ((SB_ISTNRM & (1u << 7))  ? g_fly_ack[4] : g_fly_ack[5])++;
++	}
++#endif
+ 	/* writing a 1 clears the interrupt */
+ 	if (Naomi2 && (addr & 0x02000000) != 0)
+ 		SB_ISTNRM1 &= ~data;
+diff --git a/core/hw/mem/addrspace.cpp b/core/hw/mem/addrspace.cpp
+index c08cb8e..025aaa8 100644
+--- a/core/hw/mem/addrspace.cpp
++++ b/core/hw/mem/addrspace.cpp
+@@ -7,6 +7,9 @@
+ #include "oslib/oslib.h"
+ #include "oslib/virtmem.h"
+ #include <cassert>
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ 
+ namespace addrspace
+ {
+@@ -150,6 +153,30 @@ void DYNACALL writet(u32 addr, T data)
+ {
+ 	constexpr u32 sz = sizeof(T);
+ 
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	// Diagnostic: log writes to DOA2 freeze-relevant addresses. These pass
++	// through writet<T> from SH4 interpreter (OpPtr), DMA, MMIO-callback
++	// chains — anything NOT the JIT's direct-fast-path WASM store.
++	{
++		u32 aligned = addr & ~3;
++		if (aligned == 0x8c0d9324 || aligned == 0x8c1b89b0 || aligned == 0x8c1c47c8
++		    || aligned == 0x0c0d9324 || aligned == 0x0c1b89b0 || aligned == 0x0c1c47c8
++		    || aligned == 0xac0d9324 || aligned == 0xac1b89b0 || aligned == 0xac1c47c8) {
++			static u32 writet_log_count = 0;
++			if (writet_log_count < 30) {
++				writet_log_count++;
++				EM_ASM({
++					if (!window._flyLog) window._flyLog = [];
++					window._flyLog.push('[WRITET] #' + $0
++						+ ' addr=0x' + ($1>>>0).toString(16)
++						+ ' data=0x' + ($2>>>0).toString(16)
++						+ ' sz=' + $3);
++				}, writet_log_count, addr, (u32)data, (u32)sz);
++			}
++		}
++	}
++#endif
++
+ 	u32 page = addr>>24;
+ 	uintptr_t iirf = (uintptr_t)memInfo_ptr[page];
+ 	void *ptr = (void *)(iirf & ~HANDLER_MAX);
+@@ -410,9 +437,21 @@ void initMappings()
+ 		WARN_LOG(VMEM, "Warning! nvmem is DISABLED (due to failure or not being built-in");
+ 
+ 		// Allocate it all and initialize it.
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++		EM_ASM({ console.log('[rec_wasm] initMappings: allocating Sh4RCB, size=' + $0); }, (int)sizeof(Sh4RCB));
++#endif
+ 		p_sh4rcb = (Sh4RCB*)malloc_pages(sizeof(Sh4RCB));
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++		EM_ASM({ console.log('[rec_wasm] initMappings: p_sh4rcb=' + $0); }, (int)(uintptr_t)p_sh4rcb);
++#endif
+ #if FEAT_SHREC != DYNAREC_NONE
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++		EM_ASM({ console.log('[rec_wasm] initMappings: bm_vmem_pagefill FPCB, size=' + $0); }, (int)sizeof(p_sh4rcb->fpcb));
++#endif
+ 		bm_vmem_pagefill((void**)p_sh4rcb->fpcb, sizeof(p_sh4rcb->fpcb));
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++		EM_ASM({ console.log('[rec_wasm] initMappings: bm_vmem_pagefill done'); });
++#endif
+ #endif
+ 		memset(&p_sh4rcb->cntx, 0, sizeof(p_sh4rcb->cntx));
+ 
+diff --git a/core/hw/naomi/naomi.cpp b/core/hw/naomi/naomi.cpp
+index abebd4e..3353a36 100644
+--- a/core/hw/naomi/naomi.cpp
++++ b/core/hw/naomi/naomi.cpp
+@@ -46,8 +46,13 @@ static X76F100SerialFlash romSerialId;
+ static int dmaSchedId = -1;
+ static int dmaXferDelay = 10;	// cart dma xfer speed, in cycles/byte (default 20 MB/s)
+ 
++// Diagnostic counters for serial EEPROM access tracking
++u32 g_naomi_board_write_count = 0;
++u32 g_naomi_board_read_count = 0;
++
+ void NaomiBoardIDWrite(const u16 data)
+ {
++	g_naomi_board_write_count++;
+ 	// bit 2: clock
+ 	// bit 3: data
+ 	// bit 4: reset (x76f100 only)
+@@ -60,6 +65,7 @@ void NaomiBoardIDWrite(const u16 data)
+ 
+ u16 NaomiBoardIDRead()
+ {
++	g_naomi_board_read_count++;
+ 	// bit 0 indicates the eeprom is a X76F100, otherwise the BIOS expects an AT93C46
+ 	// bit 3 is xf76f100 SDA
+ 	// bit 4 is at93c46 DO
+diff --git a/core/hw/pvr/Renderer_if.cpp b/core/hw/pvr/Renderer_if.cpp
+index 4fbb9a5..f70be84 100644
+--- a/core/hw/pvr/Renderer_if.cpp
++++ b/core/hw/pvr/Renderer_if.cpp
+@@ -14,6 +14,20 @@
+ #include <mutex>
+ #include <deque>
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++// Defined in pvr_mem.cpp — resets the per-page "already invalidated this
++// frame" bitmap so writes in the new frame invalidate cached textures.
++// fly_vram_page_reset removed — batched VRAM invalidation reverted to simplify build
++#endif
++
++// Render-pipeline diagnostic logs (present/vblank/STARTRENDER frequency).
++// Noisy — only useful for BLANK-cluster (PVR state-machine) investigation.
++// Flip to 1 when doing render-pipeline debugging; leave 0 for JIT work.
++#ifndef FLY_PVR_DIAG
++#define FLY_PVR_DIAG 0
++#endif
++
+ #ifdef LIBRETRO
+ void retro_rend_present();
+ void retro_resize_renderer(int w, int h, float aspectRatio);
+@@ -242,7 +256,18 @@ private:
+ 	{
+ 		FC_PROFILE_SCOPE;
+ 
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD) && FLY_PVR_DIAG
++		static int present_count = 0;
++		present_count++;
++		bool presResult = renderer->Present();
++		if (present_count <= 5) {
++			EM_ASM({ console.log('[rend] present #' + $0 + ': Present()=' + $1 + ' threaded=' + $2); },
++				present_count, presResult ? 1 : 0, (int)config::ThreadedRendering);
++		}
++		if (presResult)
++#else
+ 		if (renderer->Present())
++#endif
+ 		{
+ 			presented = true;
+ 			if (!config::ThreadedRendering && !ggpo::active())
+@@ -362,8 +387,31 @@ void rend_reset()
+ 	fbAddrHistory[1] = 1;
+ }
+ 
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++// Exposed for the interrupt/timer test harness in rec_wasm.cpp —
++// run_interrupt_timer_tests reads the count before/after a synthetic
++// STARTRENDER register write to verify the dispatch path.
++extern "C" {
++u32 g_fly_rend_start_render_calls = 0;
++u32 g_fly_rend_start_render_null_ctx = 0;
++}
++#endif
++
+ void rend_start_render()
+ {
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD) && FLY_PVR_DIAG
++	g_fly_rend_start_render_calls++;
++	// Log the first 5 calls so we know rendering started, then every 120
++	// thereafter for steady-state activity.
++	if (g_fly_rend_start_render_calls <= 5 || (g_fly_rend_start_render_calls % 120) == 0) {
++		EM_ASM({
++			console.log('[fly-pvr] rend_start_render=' + $0 + ' null_ctx=' + $1);
++		}, (int)g_fly_rend_start_render_calls, (int)g_fly_rend_start_render_null_ctx);
++	}
++	// Note: batched VRAM page-dirty invalidation was prototyped here but
++	// reverted to simplify the build. YUV-path invalidation in pvr_mem.cpp
++	// handles FMV games. General pvr_write32p invalidation is future work.
++#endif
+ 	render_called = true;
+ 	pend_rend = false;
+ 
+@@ -393,8 +441,12 @@ void rend_start_render()
+ 
+ 	scheduleRenderDone(ctx);
+ 
+-	if (ctx == nullptr)
++	if (ctx == nullptr) {
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++		g_fly_rend_start_render_null_ctx++;
++#endif
+ 		return;
++	}
+ 
+ 	FillBGP(ctx);
+ 
+@@ -457,6 +509,21 @@ int rend_end_render(int tag, int cycles, int jitter, void *arg)
+ 
+ void rend_vblank()
+ {
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD) && FLY_PVR_DIAG
++	static int vblank_count = 0;
++	static int last_fb_enable = -1;
++	static int last_fb_dirty = -1;
++	vblank_count++;
++	int cur_fb_enable = (int)FB_R_CTRL.fb_enable;
++	int cur_fb_dirty = (int)fb_dirty;
++	// Log on change or every 30 vblanks
++	if (cur_fb_enable != last_fb_enable || cur_fb_dirty != last_fb_dirty || (vblank_count % 30) == 0) {
++		EM_ASM({ console.log('[rend] vblank #' + $0 + ': fb_dirty=' + $1 + ' fb_enable=' + $2 + ' render_called=' + $3 + ' rend_enabled=' + $4); },
++			vblank_count, cur_fb_dirty, cur_fb_enable, (int)render_called, (int)rend_is_enabled());
++		last_fb_enable = cur_fb_enable;
++		last_fb_dirty = cur_fb_dirty;
++	}
++#endif
+ 	if (config::EmulateFramebuffer
+ 			|| (!render_called && fb_dirty && FB_R_CTRL.fb_enable))
+ 	{
+diff --git a/core/hw/pvr/pvr_mem.cpp b/core/hw/pvr/pvr_mem.cpp
+index 4b809d6..7089b9d 100644
+--- a/core/hw/pvr/pvr_mem.cpp
++++ b/core/hw/pvr/pvr_mem.cpp
+@@ -10,6 +10,8 @@
+ #include "hw/holly/sb.h"
+ #include "hw/holly/holly_intc.h"
+ #include "serialize.h"
++#include "rend/TexCache.h"  // VramLockedWriteOffset — manual tex-cache inval
++                             // on the WASM build, which has no mprotect
+ 
+ static u32 pvr_map32(u32 offset32);
+ 
+@@ -102,6 +104,23 @@ static void YUV_ConvertMacroBlock(const u8 *datap)
+ 
+ 	YUV_Block384(datap, &vram[YUV_dest]);
+ 
++#ifdef __EMSCRIPTEN__
++	// WASM: mprotect is a no-op, so texture cache page-fault invalidation
++	// never fires. Manually invalidate cached textures for the VRAM pages
++	// this macroblock wrote to. Fixes FMV playback (Dave Mirra, SoF).
++	{
++		const u32 PAGE = 4096;
++		const u32 row_bytes = YUV_x_size * 2;
++		for (u32 row = 0; row < 16; row++) {
++			u32 row_start = YUV_dest + row * row_bytes;
++			u32 row_end   = row_start + 32;
++			for (u32 off = row_start & ~(PAGE - 1); off < row_end; off += PAGE) {
++				VramLockedWriteOffset(off);
++			}
++		}
++	}
++#endif
++
+ 	YUV_dest+=32;
+ 
+ 	YUV_x_curr+=16;
+diff --git a/core/hw/pvr/pvr_regs.cpp b/core/hw/pvr/pvr_regs.cpp
+index 0538b3c..50a843a 100644
+--- a/core/hw/pvr/pvr_regs.cpp
++++ b/core/hw/pvr/pvr_regs.cpp
+@@ -4,6 +4,17 @@
+ #include "ta.h"
+ #include "spg.h"
+ #include <map>
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#include "hw/sh4/sh4_core.h"  // for Sh4cntx (sh4ctx->pc)
++extern u32 g_wasm_block_count;
++#endif
++
++// Render-pipeline diagnostic logs (STARTRENDER / FB_R_CTRL writes).
++// Noisy — only useful for BLANK-cluster investigation. Default off.
++#ifndef FLY_PVR_DIAG
++#define FLY_PVR_DIAG 0
++#endif
+ 
+ bool pal_needs_update=true;
+ 
+@@ -129,6 +140,16 @@ void pvr_WriteReg(u32 paddr,u32 data)
+ 		return; // read only
+ 
+ 	case STARTRENDER_addr:
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD) && FLY_PVR_DIAG
++		{
++			static int startrender_count = 0;
++			startrender_count++;
++			EM_ASM({ console.log('[STARTRENDER] #' + $0 +
++				' blk=' + $1 +
++				' pc=0x' + ($2>>>0).toString(16)); },
++				startrender_count, g_wasm_block_count, p_sh4rcb->cntx.pc);
++		}
++#endif
+ 		rend_start_render();
+ 		YUV_init();
+ 		return;
+@@ -163,6 +184,21 @@ void pvr_WriteReg(u32 paddr,u32 data)
+ 
+ 	case FB_R_CTRL_addr:
+ 		{
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD) && FLY_PVR_DIAG
++			static int fb_r_ctrl_write_count = 0;
++			fb_r_ctrl_write_count++;
++			u32 old_val = PvrReg(addr, u32);
++			u32 sh4_pc = p_sh4rcb->cntx.pc;
++			// Log ALL writes to FB_R_CTRL with block count and SH4 PC
++			EM_ASM({ console.log('[FB_R_CTRL-WR] #' + $0 +
++				' blk=' + $1 +
++				' pc=0x' + ($2>>>0).toString(16) +
++				' old=0x' + ($3>>>0).toString(16) +
++				' new=0x' + ($4>>>0).toString(16) +
++				' fb_enable: ' + ($3 & 1) + '->' + ($4 & 1)); },
++				fb_r_ctrl_write_count, g_wasm_block_count, sh4_pc,
++				old_val, data);
++#endif
+ 			bool vclk_div_changed = (PvrReg(addr, u32) ^ data) & (1 << 23);
+ 			PvrReg(addr, u32) = data;
+ 			if (vclk_div_changed)
+diff --git a/core/hw/pvr/ta.cpp b/core/hw/pvr/ta.cpp
+index 4207b04..9e6af18 100644
+--- a/core/hw/pvr/ta.cpp
++++ b/core/hw/pvr/ta.cpp
+@@ -2,6 +2,10 @@
+ #include "ta_ctx.h"
+ #include "hw/holly/holly_intc.h"
+ #include "pvr_mem.h"
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++#include <emscripten.h>
++#include "hw/sh4/sh4_core.h"   // Sh4cntx — EOL-storm probe (guest pc at raise)
++#endif
+ 
+ /*
+ 	Threaded TA Implementation
+@@ -221,14 +225,67 @@ static void DYNACALL ta_handle_cmd(u32 trans)
+ 	{
+ 		if (dat->pcw.ParaType == ParamType_End_Of_List)
+ 		{
++			// ORPHAN-EOL HARDENING (2026-06-12, FLY_TA_ORPHAN_EOL_FIX): an
++			// End-Of-List param arriving when NO list is open (ta_fsm_cl==7)
++			// is ignored — no interrupt, no list-state churn. Rationale: JGR
++			// legitimately streams zero-filled 32-byte slots (entities built
++			// then killed in-frame); a zero PCW parses as EOL/ListType=0.
++			// The previous behavior "adopted" the orphan EOL's list type and
++			// raised holly_OPAQUE for every such param: 88-1024 phantom
++			// interrupts/frame (storm), phantom list-state resets that mangle
++			// the parsing of subsequent real params (flicker/missing
++			// geometry), sound-driver desync, eventual freeze. Real hardware
++			// plausibly ignores EOL with no open list; a game only ever ACKs
++			// ~1 opaque EOL/frame even while streaming hundreds of zeros.
++			// Note: this matches upstream's code otherwise — candidate
++			// upstream patch if verified.
++#ifndef FLY_TA_ORPHAN_EOL_FIX
++#define FLY_TA_ORPHAN_EOL_FIX 1
++#endif
++			bool orphan_eol_ignored = false;
++#if FLY_TA_ORPHAN_EOL_FIX
++			if (ta_fsm_cl == 7)
++			{
++				orphan_eol_ignored = true;
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++				static u32 orphan_eol = 0;
++				orphan_eol++;
++				if (orphan_eol <= 10 || (orphan_eol & 0xFFF) == 0)
++					EM_ASM({ console.log('[TA-ORPHAN-EOL] #' + $0 + ' ignored (no open list)'); }, orphan_eol);
++#endif
++			}
++#else
+ 			if (ta_fsm_cl==7)
+ 				ta_fsm_cl=dat->pcw.ListType;
++#endif
+ 			//printf("List %d ended\n",ta_fsm_cl);
+ 
++			if (!orphan_eol_ignored)
++			{
+ 			if (settings.platform.isNaomi2())
+ 				asic_RaiseInterruptBothCLX(ListEndInterrupt[ta_fsm_cl]);
+ 			else
+ 				asic_RaiseInterrupt(ListEndInterrupt[ta_fsm_cl]);
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++			// OPAQUE-EOL storm probe (2026-06-12): production raises ~88 opaque
++			// list-complete ints per frame (clean: 1). Log guest pc + frame for
++			// the first raises and periodically — distinguishes a GAME retry
++			// loop (pc clusters in one small loop) from a TA-side duplication.
++			if (ta_fsm_cl == 0) {
++				extern u32 FrameCount;
++				static u32 eol_log = 0;
++				eol_log++;
++				if (eol_log <= 40 || (eol_log & 0x3FF) == 0) {
++					EM_ASM({
++						if (!window._flyLog) window._flyLog = [];
++						window._flyLog.push('[EOL-OPQ] #' + $0 + ' frame=' + $1
++							+ ' pc=0x' + ($2>>>0).toString(16)
++							+ ' pr=0x' + ($3>>>0).toString(16));
++					}, eol_log, FrameCount, Sh4cntx.pc, Sh4cntx.pr);
++				}
++			}
++#endif
++			}  // end if (!orphan_eol_ignored)
+ 			ta_fsm_cl=7;
+ 			trans=TAS_NS;
+ 		}
+diff --git a/core/hw/pvr/ta_util.cpp b/core/hw/pvr/ta_util.cpp
+index d9ed2b4..b8b95b1 100644
+--- a/core/hw/pvr/ta_util.cpp
++++ b/core/hw/pvr/ta_util.cpp
+@@ -19,6 +19,9 @@
+ #include "ta_ctx.h"
+ #include "pvr_mem.h"
+ #include <algorithm>
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include <glm/glm.hpp>
+ #include <glm/gtc/type_ptr.hpp>
+ 
+@@ -69,6 +72,16 @@ void sortTriangles(rend_context& ctx, RenderPass& pass, const RenderPass& previo
+ 	int count = pass.tr_count - first;
+ 	if (count == 0)
+ 		return;
++#ifdef __EMSCRIPTEN__
++	// Render-phase timer [1]: CPU translucency sort (render campaign).
++	// RAII — the function has several exits below.
++	extern double g_fly_rp[10];
++	struct FlyRpSortTimer {
++		double t0;
++		FlyRpSortTimer() : t0(emscripten_get_now()) {}
++		~FlyRpSortTimer() { g_fly_rp[1] += emscripten_get_now() - t0; }
++	} fly_rp_sort_timer;
++#endif
+ 
+ 	const PolyParam * const pp_base = &ctx.global_param_tr[first];
+ 	const PolyParam * const pp_end = pp_base + count;
+diff --git a/core/hw/sh4/dyna/decoder.cpp b/core/hw/sh4/dyna/decoder.cpp
+index 1fff5ee..8f90b4c 100644
+--- a/core/hw/sh4/dyna/decoder.cpp
++++ b/core/hw/sh4/dyna/decoder.cpp
+@@ -7,6 +7,12 @@
+ 
+ #if FEAT_SHREC != DYNAREC_NONE
+ 
++#include <unordered_set>
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
++
+ #include "decoder.h"
+ #include "shil.h"
+ #include "ngen.h"
+@@ -218,6 +224,16 @@ sh4dec(i0000_0000_0001_1011)
+ void dec_illegalOp(u32 op)
+ {
+ 	INFO_LOG(DYNAREC, "illegal instuction %04x at pc %x", op, state.cpu.rpc);
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	// One-shot log per unique (opcode, pc) combo so VT / JGR fallback spirals
++	// don't flood the console.
++	static std::unordered_set<u64> seen;
++	u64 key = ((u64)op << 32) | (u64)state.cpu.rpc;
++	if (seen.insert(key).second && seen.size() <= 50) {
++		EM_ASM({ console.warn('[dec_illegal] op=0x' + ($0 & 0xffff).toString(16) + ' pc=0x' + ($1>>>0).toString(16) + ' delaySlot=' + $2); },
++			(int)op, state.cpu.rpc, state.cpu.is_delayslot ? 1 : 0);
++	}
++#endif
+ 	Emit(shop_illegal, shil_param(), mk_imm(state.cpu.rpc), mk_imm(state.cpu.is_delayslot));
+ 	dec_DynamicSet(reg_nextpc);
+ 	dec_End(NullAddress, BET_DynamicJump, false);
+@@ -997,7 +1013,7 @@ bool dec_DecodeBlock(RuntimeBlockInfo* rbi,u32 max_cycles)
+ 
+ 					if (state.cpu.is_delayslot && OpDesc[op]->SetPC())
+ 						throw FlycastException("Fatal: SH4 branch instruction in delay slot");
+-					if (!OpDesc[op]->rec_oph)
++						if (!OpDesc[op]->rec_oph)
+ 					{
+ 						if (!dec_generic(op))
+ 						{
+diff --git a/core/hw/sh4/dyna/driver.cpp b/core/hw/sh4/dyna/driver.cpp
+index 4e1fbf3..d025874 100644
+--- a/core/hw/sh4/dyna/driver.cpp
++++ b/core/hw/sh4/dyna/driver.cpp
+@@ -1,6 +1,10 @@
+ #include "types.h"
+ #include <unordered_set>
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
++
+ #include "hw/sh4/sh4_interpreter.h"
+ #include "hw/sh4/sh4_core.h"
+ #include "hw/sh4/sh4_interrupts.h"
+@@ -15,6 +19,10 @@
+ 
+ #if FEAT_SHREC != DYNAREC_NONE
+ 
++#if defined(__EMSCRIPTEN__) && HOST_CPU == CPU_GENERIC
++extern "C" void wasm_dynarec_init();
++#endif
++
+ constexpr u32 CODE_SIZE = 10_MB;
+ constexpr u32 TEMP_CODE_SIZE = 1_MB;
+ constexpr u32 FULL_SIZE = CODE_SIZE + TEMP_CODE_SIZE;
+@@ -158,8 +166,21 @@ static DynarecCodeEntryPtr compilePC(u32 blockcheck_failures)
+ {
+ 	const u32 pc = Sh4cntx.pc;
+ 
++#if defined(__EMSCRIPTEN__) && HOST_CPU == CPU_GENERIC
++	// WASM backend: the "magic PC" triggers (0x8c0000e0 / 0xac010000 /
++	// 0xac008300) cause a full cache flush on native JITs where reset is
++	// cheap. On our backend, a reset discards every compiled WebAssembly
++	// module and forces a multi-frame interpreter spiral to recover —
++	// measured at ~2.6k blocks / 4–5 s of wall time per reset. SMC is
++	// already handled per-block by the inline hash check in c_dispatch_loop,
++	// so the reset is redundant for correctness. Also skip the 32 KB free-
++	// space check — the WASM backend only advances codeBuffer by 4 bytes
++	// per block (dummy host_code_size marker), so pressure never hits.
++	(void)pc;
++#else
+ 	if (codeBuffer.getFreeSpace() < 32_KB || pc == 0x8c0000e0 || pc == 0xac010000 || pc == 0xac008300)
+ 		Sh4Recompiler::Instance->ResetCache();
++#endif
+ 
+ 	RuntimeBlockInfo* rbi = sh4Dynarec->allocateBlock();
+ 
+@@ -342,26 +363,54 @@ void Sh4Recompiler::Reset(bool hard)
+ void Sh4Recompiler::Init()
+ {
+ 	INFO_LOG(DYNAREC, "Sh4Recompiler::Init");
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 1: super::Init()'); });
++#endif
+ 	super::Init();
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 2: bm_Init()'); });
++#endif
+ 	bm_Init();
+-	
++
+ 	if (addrspace::virtmemEnabled())
+ 		verify(&mem_b[0] == ((u8*)getContext()->sq_buffer + sizeof(Sh4Context) + 0x0C000000));
+ 
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 3: prepare_jit_block()'); });
++#endif
+ 	// Call the platform-specific magic to make the pages RWX
+ 	CodeCache = nullptr;
+ #ifdef FEAT_NO_RWX_PAGES
+ 	bool rc = virtmem::prepare_jit_block(SH4_TCB, FULL_SIZE, (void**)&CodeCache, &cc_rx_offset);
+ #else
+ 	bool rc = virtmem::prepare_jit_block(SH4_TCB, FULL_SIZE, (void**)&CodeCache);
++#endif
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 3 result: rc=' + $0 + ' CodeCache=' + $1); }, (int)rc, (int)(uintptr_t)CodeCache);
+ #endif
+ 	verify(rc);
+ 	// Ensure the pointer returned is non-null
+ 	verify(CodeCache != nullptr);
+ 
+ 	TempCodeCache = CodeCache + CODE_SIZE;
++#if defined(__EMSCRIPTEN__) && HOST_CPU == CPU_GENERIC
++	// Ensure WASM dynarec is initialized — the static constructor may not have
++	// run if the linker stripped the translation unit from the archive.
++	wasm_dynarec_init();
++#endif
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 4: sh4Dynarec->init(), sh4Dynarec=' + $0 + ' ctx=' + $1); },
++		(int)(uintptr_t)sh4Dynarec, (int)(uintptr_t)getContext());
++#endif
++	verify(sh4Dynarec != nullptr);
+ 	sh4Dynarec->init(*getContext(), codeBuffer);
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 5: bm_ResetCache()'); });
++#endif
+ 	bm_ResetCache();
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — COMPLETE'); });
++#endif
+ }
+ 
+ void Sh4Recompiler::Term()
+diff --git a/core/hw/sh4/dyna/ngen.h b/core/hw/sh4/dyna/ngen.h
+index de50ba1..53bb30f 100644
+--- a/core/hw/sh4/dyna/ngen.h
++++ b/core/hw/sh4/dyna/ngen.h
+@@ -127,9 +127,17 @@ class Sh4Recompiler : public Sh4Interpreter
+ public:
+ 	Sh4Recompiler() {
+ 		Instance = this;
++		// Sh4Interpreter and Sh4Recompiler each declare their own static
++		// `Instance` pointer — C++ name shadowing. Without this line, the
++		// base pointer stays nullptr until WasmDynarec::Run() sets it at
++		// top-of-mainloop; any code path that reaches Sh4Interpreter::Instance
++		// earlier (e.g. a test harness that runs branch opcodes at boot)
++		// dereferences nullptr. Upcast is implicit via inheritance.
++		Sh4Interpreter::Instance = this;
+ 	}
+ 	~Sh4Recompiler() {
+ 		Instance = nullptr;
++		Sh4Interpreter::Instance = nullptr;
+ 	}
+ 	void Run() override;
+ 	void ResetCache() override;
+diff --git a/core/hw/sh4/dyna/shil_canonical.h b/core/hw/sh4/dyna/shil_canonical.h
+index a1be200..3727ab8 100644
+--- a/core/hw/sh4/dyna/shil_canonical.h
++++ b/core/hw/sh4/dyna/shil_canonical.h
+@@ -747,6 +747,22 @@ u32,f1,(f32 f1),
+ 	}
+ 	return res;
+ )
++#else
++// CPU_GENERIC (Emscripten/WASM) — same behavior as ARM (NaN → 0x80000000)
++shil_canonical
++(
++u32,f1,(f32 f1),
++	s32 res;
++	if (f1 > 2147483520.0f) {
++		res = 0x7fffffff;
++	}
++	else {
++		res = (s32)f1;
++		if (std::isnan(f1))
++			res = 0x80000000;
++	}
++	return res;
++)
+ #endif
+ 
+ shil_compile
+diff --git a/core/hw/sh4/dyna/ssa.cpp b/core/hw/sh4/dyna/ssa.cpp
+index 85c1fdf..a62439b 100644
+--- a/core/hw/sh4/dyna/ssa.cpp
++++ b/core/hw/sh4/dyna/ssa.cpp
+@@ -489,6 +489,11 @@ void SSAOptimizer::ConstPropPass()
+ 				// and if those pages are read-only, then we can directly read the memory at compile time
+ 				// and propagate the read value as a constant.
+ 				if (op.op == shop_readm  && block->read_only
++#ifdef __EMSCRIPTEN__
++						&& false  // WASM: mprotect is a no-op, so read-only pages
++						          // aren't actually protected. Compile-time reads
++						          // become stale when the page is written to.
++#endif
+ 						&& (op.rs1._imm >> 12) >= (block->vaddr >> 12)
+ 						&& (op.rs1._imm >> 12) <= ((block->vaddr + block->sh4_code_size - 1) >> 12)
+ 						&& op.size <= 4)
+diff --git a/core/hw/sh4/interpr/sh4_opcodes.cpp b/core/hw/sh4/interpr/sh4_opcodes.cpp
+index 26df085..5111699 100644
+--- a/core/hw/sh4/interpr/sh4_opcodes.cpp
++++ b/core/hw/sh4/interpr/sh4_opcodes.cpp
+@@ -826,8 +826,14 @@ sh4op(i0000_nnnn_0000_0011)
+ 
+ 
+  //rte
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++extern "C" { u32 g_fly_rte_count = 0; }
++#endif
+ sh4op(i0000_0000_0010_1011)
+ {
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	g_fly_rte_count++;
++#endif
+ 	u32 newpc = ctx->spc;
+ 	Sh4Interpreter::Instance->ExecuteDelayslot_RTE();
+ 	ctx->pc = newpc;
+diff --git a/core/hw/sh4/modules/dmac.cpp b/core/hw/sh4/modules/dmac.cpp
+index 6fadc99..695a599 100644
+--- a/core/hw/sh4/modules/dmac.cpp
++++ b/core/hw/sh4/modules/dmac.cpp
+@@ -12,6 +12,10 @@
+ #include "dmac.h"
+ #include "hw/sh4/sh4_interrupts.h"
+ #include "hw/holly/holly_intc.h"
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++#include <emscripten.h>
++#include "hw/sh4/sh4_core.h"   // Sh4cntx — CH2-DMA storm probe
++#endif
+ 
+ DMACRegisters dmac;
+ 
+@@ -26,6 +30,21 @@ void DMAC_Ch2St()
+ 	if (0x8201 != (dmaor & DMAOR_MASK))
+ 	{
+ 		INFO_LOG(SH4, "DMAC: DMAOR has invalid settings (%X) !", dmaor);
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++		// CH2-DMA STORM PROBE (2026-06-12): this silent return swallows the
++		// kick — no completion int, no TE, no C2DST clear → the game's TA-DMA
++		// submit loop (JGR: 0x8c21faac) retries forever. Log it loudly.
++		{
++			static u32 bador = 0;
++			bador++;
++			if (bador <= 20 || (bador & 0x3FF) == 0)
++				EM_ASM({
++					if (!window._flyLog) window._flyLog = [];
++					window._flyLog.push('[CH2-BADOR] #' + $0 + ' DMAOR=0x' + ($1>>>0).toString(16)
++						+ ' pc=0x' + ($2>>>0).toString(16) + ' CHCR2=0x' + ($3>>>0).toString(16));
++				}, bador, dmaor, Sh4cntx.pc, DMAC_CHCR(2).full);
++		}
++#endif
+ 		return;
+ 	}
+ 	if ((src >> 26) != 3)
+@@ -38,6 +57,72 @@ void DMAC_Ch2St()
+ 	}
+ 
+ 	DEBUG_LOG(SH4, ">> DMAC: Ch2 DMA SRC=%X DST=%X LEN=%X", src, SB_C2DSTAT, SB_C2DLEN);
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	// CH2-DMA transfer log: EOL storm shows ~1024 opaque-EOLs/frame vs ~4.4
++	// ch2 completions/frame → each transfer must carry hundreds of EOL params
++	// = garbage stream. Log src/dst/len to see whether SAR2/LEN are sane.
++	{
++		static u32 ch2n = 0;
++		ch2n++;
++		// STREAM-CONTENT SCAN at transfer time (the dump-based zero-tail read
++		// was ambiguous: the game may clear the buffer post-DMA, so only the
++		// content AT TRANSFER TIME is trustworthy). Count params whose PCW
++		// parses as End-Of-List (type 0 = top 3 bits clear) and, of those, how
++		// many are fully zero words. Expectation: clean ~1 EOL/transfer-ish;
++		// prod dozens+ — and zeroEol tells zeros-in-stream vs real repeats.
++		u32 eolParams = 0, zeroEol = 0, nParams = 0;
++		// Zero-run geometry: discriminates tail-truncation (builder/kick race)
++		// vs scattered 32B holes (lost SQ bursts) vs interior blocks (skipped
++		// builder section). A "zero param" = PCW == 0 at a 32B boundary.
++		u32 zeroRuns = 0, firstZeroOff = 0xFFFFFFFF, lastDataOff = 0, inRun = 0;
++		if ((SB_C2DSTAT & 0x01000000) == 0 && (src & RAM_MASK) + len <= RAM_SIZE) {
++			const u8* p = (const u8*)GetMemPtr(src, len);
++			if (p) {
++				for (u32 off = 0; off + 32 <= len; off += 32) {
++					u32 pcw = *(const u32*)(p + off);
++					nParams++;
++					if ((pcw >> 29) == 0) {
++						eolParams++;
++						if (pcw == 0) zeroEol++;
++					}
++					if (pcw == 0) {
++						if (!inRun) { zeroRuns++; inRun = 1; if (firstZeroOff == 0xFFFFFFFF) firstZeroOff = off; }
++					} else {
++						inRun = 0;
++						lastDataOff = off;
++					}
++				}
++			}
++		}
++		extern u32 FrameCount;
++		if (ch2n <= 40 || eolParams > 8 || (ch2n & 0xFF) == 0)
++			EM_ASM({
++				if (!window._flyLog) window._flyLog = [];
++				window._flyLog.push('[CH2-DMA] #' + $0 + ' frame=' + $1
++					+ ' len=0x' + ($2>>>0).toString(16)
++					+ ' params=' + $3 + ' eol=' + $4 + ' zeroEol=' + $5
++					+ ' runs=' + $6 + ' firstZero=0x' + ($7>>>0).toString(16)
++					+ ' lastData=0x' + ($8>>>0).toString(16));
++			}, ch2n, FrameCount, SB_C2DLEN, nParams, eolParams, zeroEol,
++			   zeroRuns, firstZeroOff, lastDataOff);
++		// Adopt this transfer's first hole as the live watch target (dynamic
++		// write-provenance: see g_fly_watch_off in rec_wasm.cpp). Only when a
++		// real anomaly exists (>8 EOLs) to avoid chasing the legit terminator.
++		if (eolParams > 8 && firstZeroOff != 0xFFFFFFFF) {
++			extern u32 g_fly_watch_off[2];
++			u32 newoff = (src & RAM_MASK) + firstZeroOff;
++			if (g_fly_watch_off[0] != newoff) {
++				g_fly_watch_off[1] = g_fly_watch_off[0];
++				g_fly_watch_off[0] = newoff;
++				EM_ASM({
++					if (!window._flyLog) window._flyLog = [];
++					window._flyLog.push('[WATCH-SET] frame=' + $0
++						+ ' off=0x' + ($1>>>0).toString(16));
++				}, FrameCount, newoff);
++			}
++		}
++	}
++#endif
+ 
+ 	// Direct DList DMA (Ch2)
+ 
+diff --git a/core/hw/sh4/sh4_core_regs.cpp b/core/hw/sh4/sh4_core_regs.cpp
+index 7542f13..cd08852 100644
+--- a/core/hw/sh4/sh4_core_regs.cpp
++++ b/core/hw/sh4/sh4_core_regs.cpp
+@@ -18,8 +18,23 @@ static void ChangeGPR()
+ 
+ //called when sr is changed and we must check for reg banks etc.
+ //returns true if interrupt pending
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++extern "C" {
++// BL transitions — captures exception entry (0→1) and exit (1→0) regardless of
++// whether the code path goes through the RTE interpreter or gets rewritten into
++// SHIL ops by the JIT decoder. The raw `g_fly_rte_count` from sh4_opcodes.cpp
++// only counts interpreter-mode RTEs and massively under-reports.
++u32 g_fly_bl_clear_count = 0;
++u32 g_fly_bl_set_count = 0;
++}
++#endif
++
+ bool UpdateSR()
+ {
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	if (Sh4cntx.old_sr.BL == 1 && Sh4cntx.sr.BL == 0) g_fly_bl_clear_count++;
++	if (Sh4cntx.old_sr.BL == 0 && Sh4cntx.sr.BL == 1) g_fly_bl_set_count++;
++#endif
+ 	if (Sh4cntx.sr.MD)
+ 	{
+ 		if (Sh4cntx.old_sr.RB != Sh4cntx.sr.RB)
+@@ -120,6 +135,10 @@ static void setHostRoundingMode(u32 roundingMode, u32 denorm2zero)
+                 : "r"(off_mask), "r"(on_mask)
+ 				: "x10"
+             );
++    #elif defined(__EMSCRIPTEN__) || defined(__wasm__) || HOST_CPU == CPU_GENERIC
++		// WASM/generic: no hardware FPU control — rounding mode is not configurable
++		(void)roundingMode;
++		(void)denorm2zero;
+     #else
+ 	#error "SetFloatStatusReg: Unsupported platform"
+     #endif
+diff --git a/core/hw/sh4/sh4_interrupts.cpp b/core/hw/sh4/sh4_interrupts.cpp
+index 49a3be4..aeeeea7 100644
+--- a/core/hw/sh4/sh4_interrupts.cpp
++++ b/core/hw/sh4/sh4_interrupts.cpp
+@@ -196,10 +196,39 @@ static void Do_Interrupt(Sh4ExceptionCode intEvn)
+ 	debugger::subroutineCall();
+ }
+ 
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++// Exception histogram for freeze-watchdog diagnostics.
++// Sh4ExceptionCode fits in the lower 16 bits; bucket by the raw value.
++extern "C" {
++u32 g_fly_exc_count[1024] = {0};          // counter per expEvn (indexed by expEvn & 0x3FF)
++u32 g_fly_exc_total = 0;                  // total Do_Exception calls
++#define FLY_EXC_TRACE_LEN 32
++u32 g_fly_exc_trace_epc[FLY_EXC_TRACE_LEN] = {0};
++u32 g_fly_exc_trace_evn[FLY_EXC_TRACE_LEN] = {0};
++u32 g_fly_exc_trace_head = 0;             // monotonic; last written = (head-1) & mask
++// Snapshot-on-first-illegal hook (defined in rec_wasm.cpp)
++void fly_snapshot_first_exc(u32 epc, u32 evn);
++}
++#endif
++
+ void Do_Exception(u32 epc, Sh4ExceptionCode expEvn)
+ {
+ 	assert((expEvn >= Sh4Ex_TlbMissRead && expEvn <= Sh4Ex_SlotIllegalInstr)
+ 			|| expEvn == Sh4Ex_FpuDisabled || expEvn == Sh4Ex_SlotFpuDisabled || expEvn == Sh4Ex_UserBreak);
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	g_fly_exc_total++;
++	g_fly_exc_count[((u32)expEvn) & 0x3FF]++;
++	u32 ti = g_fly_exc_trace_head & (FLY_EXC_TRACE_LEN - 1);
++	g_fly_exc_trace_epc[ti] = epc;
++	g_fly_exc_trace_evn[ti] = (u32)expEvn;
++	g_fly_exc_trace_head++;
++	// Snapshot the PC trace on the very first illegal-instruction fault.
++	// The handler immediately starts overwriting the live ring, so we need
++	// a preserved copy to find which block made the initial bad jump.
++	if (expEvn == Sh4Ex_IllegalInstr || expEvn == Sh4Ex_SlotIllegalInstr) {
++		fly_snapshot_first_exc(epc, (u32)expEvn);
++	}
++#endif
+ 	if (Sh4cntx.sr.BL != 0)
+ 		throw FlycastException("Fatal: SH4 exception when blocked");
+ 	CCN_EXPEVT = expEvn;
+diff --git a/core/hw/sh4/sh4_mem.cpp b/core/hw/sh4/sh4_mem.cpp
+index 196cdf5..7e485a3 100644
+--- a/core/hw/sh4/sh4_mem.cpp
++++ b/core/hw/sh4/sh4_mem.cpp
+@@ -201,8 +201,29 @@ void mem_Term()
+ 	addrspace::term();
+ }
+ 
++
++#ifdef __EMSCRIPTEN__
++// Page-generation SMC (rec_wasm.cpp): block writers bypass the JIT store
++// imports — bump the written pages here so lazily-hashed dispatch slots
++// re-verify against DMA/SQ-loaded code.
++extern u32 g_fly_page_gen[];
++static inline void fly_block_written(u32 dst, u32 size) {
++	u32 phys = dst & 0x1FFFFFFF;
++	if ((phys >> 26) != 3 || size == 0) return;
++	u32 p0 = (phys & (RAM_SIZE - 1)) >> 12;
++	u32 p1 = ((phys + size - 1) & (RAM_SIZE - 1)) >> 12;
++	for (u32 p = p0; ; p = (p + 1) & ((RAM_SIZE - 1) >> 12)) {
++		g_fly_page_gen[p]++;
++		if (p == p1) break;
++	}
++}
++#else
++static inline void fly_block_written(u32, u32) {}
++#endif
++
+ void WriteMemBlock_nommu_dma(u32 dst, u32 src, u32 size)
+ {
++	fly_block_written(dst, size);   // covers the direct-memcpy branch too
+ 	bool dst_ismem, src_ismem;
+ 	void* dst_ptr = addrspace::writeConst(dst, dst_ismem, 4);
+ 	void* src_ptr = addrspace::readConst(src, src_ismem, 4);
+@@ -225,6 +246,7 @@ void WriteMemBlock_nommu_dma(u32 dst, u32 src, u32 size)
+ 
+ void WriteMemBlock_nommu_ptr(u32 dst, const u32 *src, u32 size)
+ {
++	fly_block_written(dst, size);
+ 	bool dst_ismem;
+ 
+ 	void* dst_ptr = addrspace::writeConst(dst, dst_ismem, 4);
+@@ -259,6 +281,7 @@ void WriteMemBlock_nommu_ptr(u32 dst, const u32 *src, u32 size)
+ 
+ void WriteMemBlock_nommu_sq(u32 dst, const SQBuffer *src)
+ {
++	fly_block_written(dst, 32);
+ 	// destination address is 32-byte aligned
+ 	SQBuffer *pdst = (SQBuffer *)GetMemPtr(dst, sizeof(SQBuffer));
+ 	if (pdst != nullptr)
+diff --git a/core/hw/sh4/storeq.cpp b/core/hw/sh4/storeq.cpp
+index 2f4f712..9239347 100644
+--- a/core/hw/sh4/storeq.cpp
++++ b/core/hw/sh4/storeq.cpp
+@@ -21,6 +21,45 @@
+ 
+ static u32 CCN_QACR_TR[2];
+ 
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++#include <emscripten.h>
++// SQ lifecycle counters (JGR zero-hole hunt, 2026-06-12): which stage loses
++// the ~2% of 32-byte bursts in production? [0]=flush calls total,
++// [1]=flushes to RAM area3, [2]=flushes landing in the JGR staging region
++// (0x6dae00..0x740000 RAM offset), [3]=flushes routed to TA, [4]=handler
++// is generic sqWrite (QACR-translated), [5]=current QACR_TR[0] sample.
++extern "C" {
++u32 g_fly_sq[8];
++u32 EMSCRIPTEN_KEEPALIVE fly_sq_ptr() { return (u32)(uintptr_t)g_fly_sq; }
++u32 EMSCRIPTEN_KEEPALIVE fly_sq_len() { return 8; }
++}
++// Watch the live hole addresses (shared dynamic targets, see rec_wasm.cpp)
++extern "C" u32 g_fly_watch_off[2];
++static inline void fly_sq_watch(u32 ramOff, const void* data) {
++	const u32* WOFF = g_fly_watch_off;
++	for (int i = 0; i < 2; i++) {
++		if (ramOff <= WOFF[i] && WOFF[i] < ramOff + 32) {
++			extern u32 FrameCount;
++			EM_ASM({
++				if (!window._flyLog) window._flyLog = [];
++				window._flyLog.push('[WATCH-SQ] frame=' + $0 + ' off=0x' + ($1>>>0).toString(16)
++					+ ' first=0x' + ($2>>>0).toString(16));
++			}, FrameCount, ramOff, *(const u32*)data);
++		}
++	}
++}
++static inline void fly_sq_note(u32 address) {
++	g_fly_sq[0]++;
++	if (((address >> 26) & 7) == 3) {
++		g_fly_sq[1]++;
++		u32 off = address & RAM_MASK;
++		if (off >= 0x6dae00 && off < 0x740000) g_fly_sq[2]++;
++	} else if (((address >> 26) & 7) == 4) {
++		g_fly_sq[3]++;
++	}
++}
++#endif
++
+ template<bool mmu_on>
+ static void DYNACALL sqWrite(u32 dest, Sh4Context *ctx)
+ {
+@@ -49,6 +88,11 @@ static void DYNACALL sqWrite(u32 dest, Sh4Context *ctx)
+ 	{
+ 		TAWriteSQ(address, ctx->sq_buffer);	// TODO pass the correct SQBuffer instead of letting TAWriteSQ deal with it
+ 	}
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	fly_sq_note(address);
++	g_fly_sq[4]++;  // generic QACR-translated handler used
++	g_fly_sq[5] = CCN_QACR_TR[0];
++#endif
+ }
+ 
+ //yes, this micro optimization makes a difference
+@@ -64,11 +108,22 @@ static void DYNACALL sqWrite_nommu_area_3_nonvmem(u32 dest, Sh4Context *ctx)
+ 	u8* pmem = &mem_b[0];
+ 
+ 	memcpy((SQBuffer *)&pmem[dest & (RAM_MASK - 0x1F)], &ctx->sq_buffer[(dest >> 5) & 1], sizeof(SQBuffer));
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	{
++		u32 off = dest & (RAM_MASK - 0x1F);
++		g_fly_sq[0]++; g_fly_sq[1]++;
++		if (off >= 0x6dae00 && off < 0x740000) g_fly_sq[2]++;
++		fly_sq_watch(off, &ctx->sq_buffer[(dest >> 5) & 1]);
++	}
++#endif
+ }
+ 
+ static void DYNACALL sqWriteTA(u32 dest, Sh4Context *ctx)
+ {
+ 	TAWriteSQ(dest, ctx->sq_buffer);
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	g_fly_sq[0]++; g_fly_sq[3]++;
++#endif
+ }
+ 
+ void setSqwHandler()
+diff --git a/core/linux/context.cpp b/core/linux/context.cpp
+index 461ff26..a8ba32c 100644
+--- a/core/linux/context.cpp
++++ b/core/linux/context.cpp
+@@ -130,6 +130,10 @@ static void context_segfault(host_context_t* hostctx, void* segfault_ctx)
+     #else
+         #error "Unsupported OS"
+ 	#endif
++#elif HOST_CPU == CPU_GENERIC
++	// No segfault context handling for generic/WASM platform (interpreter only)
++	(void)hostctx;
++	(void)segfault_ctx;
+ #else
+ 	#error Unsupported HOST_CPU
+ #endif
+diff --git a/core/linux/posix_vmem.cpp b/core/linux/posix_vmem.cpp
+index 4610515..f52ac64 100644
+--- a/core/linux/posix_vmem.cpp
++++ b/core/linux/posix_vmem.cpp
+@@ -4,7 +4,7 @@
+ // Android and OSX since they are slightly different in some areas.
+ #include "types.h"
+ 
+-#ifndef __SWITCH__
++#if !defined(__SWITCH__) && !defined(__EMSCRIPTEN__)
+ #include <sys/mman.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -326,7 +326,50 @@ void release_jit_block(void *code_area1, void *code_area2, size_t size)
+ 
+ } // namespace virtmem
+ 
+-#endif // !__SWITCH__
++#endif // !__SWITCH__ && !__EMSCRIPTEN__
++
++#ifdef __EMSCRIPTEN__
++// Emscripten: no mmap/shm_open/mprotect support.
++// All virtmem functions are no-ops. addrspace::initMappings() will use
++// the malloc-based fallback path when virtmem::init() returns false.
++#include "hw/mem/addrspace.h"
++#include "hw/sh4/sh4_if.h"
++#include "oslib/virtmem.h"
++
++namespace virtmem
++{
++
++bool region_lock(void *start, size_t len) { return true; }
++bool region_unlock(void *start, size_t len) { return true; }
++bool region_set_exec(void *start, size_t len) { return true; }
++bool init(void **vmem_base_addr, void **sh4rcb_addr, size_t ramSize) { return false; }
++void destroy() {}
++void reset_mem(void *ptr, unsigned size_bytes) { memset(ptr, 0, size_bytes); }
++void ondemand_page(void *address, unsigned size_bytes) {}
++void create_mappings(const Mapping *vmem_maps, unsigned nummaps) {}
++bool prepare_jit_block(void *code_area, size_t size, void **code_area_rwx) {
++	// WASM JIT: no native code execution, but we need a valid buffer for the block manager
++	// Allocate a dummy buffer — rec_wasm doesn't write native code into it, but driver.cpp expects non-null
++	static u8* wasmJitBuffer = nullptr;
++	if (!wasmJitBuffer)
++		wasmJitBuffer = (u8*)malloc(size);
++	if (!wasmJitBuffer)
++		return false;
++	memset(wasmJitBuffer, 0, size);
++	*code_area_rwx = wasmJitBuffer;
++	return true;
++}
++bool prepare_jit_block(void *code_area, size_t size, void **code_area_rw, ptrdiff_t *rx_offset) {
++	bool rc = prepare_jit_block(code_area, size, code_area_rw);
++	if (rc && rx_offset)
++		*rx_offset = 0;
++	return rc;
++}
++void release_jit_block(void *code_area, size_t size) { /* buffer is static, leaked intentionally */ }
++void release_jit_block(void *code_area1, void *code_area2, size_t size) {}
++
++} // namespace virtmem
++#endif // __EMSCRIPTEN__
+ 
+ namespace virtmem
+ {
+diff --git a/core/oslib/virtmem.h b/core/oslib/virtmem.h
+index 143d093..5b72309 100644
+--- a/core/oslib/virtmem.h
++++ b/core/oslib/virtmem.h
+@@ -1,7 +1,10 @@
+ #pragma once
+ #include "types.h"
+ 
+-#if defined(_WIN32) || defined(TARGET_IPHONE) || defined(TARGET_ARM_MAC)
++#if defined(__EMSCRIPTEN__)
++// Emscripten: no native code execution. Use a pointer (allocated via malloc in prepare_jit_block).
++#define DECLARE_CODE_CACHE(Name, Size) static u8 *Name;
++#elif defined(_WIN32) || defined(TARGET_IPHONE) || defined(TARGET_ARM_MAC)
+ #define DECLARE_CODE_CACHE(Name, Size) static u8 *Name;
+ #elif defined(__ANDROID__)
+ #define DECLARE_CODE_CACHE(Name, Size) alignas(4096) static u8 Name[Size];
+diff --git a/core/rend/TexCache.cpp b/core/rend/TexCache.cpp
+index 9316bef..f46df27 100644
+--- a/core/rend/TexCache.cpp
++++ b/core/rend/TexCache.cpp
+@@ -226,8 +226,36 @@ void BaseTextureCacheData::PrintTextureName()
+ #endif
+ }
+ 
++// DIAGNOSTIC (2026-06-12): on WASM, texture invalidation-on-write is dead —
++// protectVram relies on mprotect page faults (no-op under Emscripten), so
++// `dirty` is never set by guest VRAM writes and every texture is permanently
++// frozen at its first upload (palette/YUV paths aside). Suspected cause of the
++// JGR menu glitches. This flag forces a re-decode from live VRAM on every use:
++// slow, but isolates exactly one variable (texture freshness). If glitches
++// vanish with this ON, the fix is per-page write tracking (area-1 is currently
++// direct-mapped in addrspace writet — needs handler routing to observe writes).
++#define FLY_TEX_ALWAYS_UPDATE 0   // diagnostic OFF — replaced by checksum-on-use below (2026-07-16). The always-update run was user-verified on Skies: forcing texture freshness removed the "textures where they aren't supposed to be" glitches. Keep for future A/B.
++
++#ifdef __EMSCRIPTEN__
++// Hash of the texture's full VRAM source — the same [startAddress,
++// mmStartAddress+size) range protectVRam guards natively (VQ codebook and
++// all mip levels included, since they sit between the two).
++u32 BaseTextureCacheData::liveVramHash() const
++{
++	u32 end = mmStartAddress + size;
++	if (end > VRAM_SIZE)
++		end = VRAM_SIZE;
++	if (startAddress >= end)
++		return 0;
++	return XXH32(&vram[startAddress], end - startAddress, 7);
++}
++#endif
++
+ //true if : dirty or paletted texture and hashes don't match
+ bool BaseTextureCacheData::NeedsUpdate() {
++#if defined(__EMSCRIPTEN__) && FLY_TEX_ALWAYS_UPDATE
++	return true;
++#endif
+ 	bool rc = dirty != 0;
+ 	if (tex_type != TextureType::_8)
+ 	{
+@@ -236,6 +264,25 @@ bool BaseTextureCacheData::NeedsUpdate() {
+ 		else if (tcw.PixelFmt == PixelPal8 && palette_hash != pal_hash_256[tcw.PalSelect >> 4])
+ 			rc = true;
+ 	}
++#ifdef __EMSCRIPTEN__
++	// Checksum-on-use invalidation: mprotect is a no-op on WASM so `dirty` is
++	// never set by guest VRAM writes and textures would stay frozen at first
++	// upload (user-verified cause of the Skies misplaced-texture glitches).
++	// Rehash the VRAM source (at most once per frame per texture) and
++	// re-decode when it changed. Unlike write-side page tracking, this cannot
++	// be bypassed by unobserved write paths (SQ bursts, DMA memcpy) — it
++	// checks the data, not the writers.
++	if (!rc && Updates > 0 && wasm_hash_frame != FrameCount)
++	{
++		wasm_hash_frame = FrameCount;
++		u32 h = liveVramHash();
++		if (h != wasm_vram_hash)
++		{
++			wasm_vram_hash = h;
++			rc = true;
++		}
++	}
++#endif
+ 
+ 	return rc;
+ }
+@@ -442,6 +489,12 @@ bool BaseTextureCacheData::Update()
+ 	dirty = 0;
+ 	gpuPalette = false;
+ 	tex_type = tex->type;
++#ifdef __EMSCRIPTEN__
++	// Baseline for checksum-on-use invalidation: hash the exact VRAM bytes
++	// this update is about to decode.
++	wasm_vram_hash = liveVramHash();
++	wasm_hash_frame = FrameCount;
++#endif
+ 
+ 	bool has_alpha = false;
+ 	if (IsPaletted())
+diff --git a/core/rend/TexCache.h b/core/rend/TexCache.h
+index 8c922ae..4abda64 100644
+--- a/core/rend/TexCache.h
++++ b/core/rend/TexCache.h
+@@ -105,6 +105,14 @@ public:
+ 	u32 texture_hash;			// xxhash of texture data, used for custom textures
+ 	u32 old_vqtexture_hash;		// legacy hash for vq textures
+ 	u32 old_texture_hash;		// legacy hash
++#ifdef __EMSCRIPTEN__
++	// Checksum-on-use invalidation (WASM has no mprotect, so VramLockedWrite
++	// never fires): xxhash of the texture's full VRAM protect range, refreshed
++	// at Update() and re-checked at most once per frame in NeedsUpdate().
++	u32 wasm_vram_hash = 0;
++	u32 wasm_hash_frame = ~0u;	// FrameCount of the last hash check
++	u32 liveVramHash() const;
++#endif
+ 	u8* custom_image_data;		// loaded custom image data
+ 	u32 custom_width;
+ 	u32 custom_height;
+diff --git a/core/rend/gles/gles.cpp b/core/rend/gles/gles.cpp
+index d395d67..d9170dd 100644
+--- a/core/rend/gles/gles.cpp
++++ b/core/rend/gles/gles.cpp
+@@ -2,6 +2,9 @@
+ #include "gles.h"
+ #include "quad.h"
+ #include "hw/pvr/ta.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #ifndef LIBRETRO
+ #include "ui/gui.h"
+ #else
+@@ -1058,6 +1061,16 @@ void OpenGLRenderer::drawOSD()
+ #endif
+ }
+ 
++// ★ RENDER-PHASE TIMERS (2026-07-22, render campaign): prod-active
++// per-frame accumulators, reported via the HUD/hudlog recorder.
++// [0]=ta_parse total ms (includes sort)  [1]=sortTriangles ms
++// [2]=renderFrame (GL submission) ms    [3]=render count
++// [4]=emu.render() total ms             [5]=AICA/ARM7 ms
++// [6]=vblanks emulated                  [7]=multi-frame ticks
++// [8]=SH4 mainloop ms (rec_wasm FRAME window)  [9]=spare
++// Decomposes core-time: mainloop vs render-glue vs parse vs GL submit.
++double g_fly_rp[10];
++
+ void OpenGLRenderer::Process(TA_context* ctx)
+ {
+ 	if (gl.gl_major < 3 && settings.platform.isNaomi2())
+@@ -1077,7 +1090,15 @@ void OpenGLRenderer::Process(TA_context* ctx)
+ 		updatePaletteTexture(getPaletteTextureSlot());
+ 		updatePalette = false;
+ 	}
++#ifdef __EMSCRIPTEN__
++	{
++		double t0 = emscripten_get_now();
++		ta_parse(ctx, gl.prim_restart_fixed_supported || gl.prim_restart_supported);
++		g_fly_rp[0] += emscripten_get_now() - t0;
++	}
++#else
+ 	ta_parse(ctx, gl.prim_restart_fixed_supported || gl.prim_restart_supported);
++#endif
+ }
+ 
+ static void upload_vertex_indices()
+@@ -1098,6 +1119,14 @@ static void upload_vertex_indices()
+ 
+ bool OpenGLRenderer::renderFrame(int width, int height)
+ {
++#ifdef __EMSCRIPTEN__
++	// RAII: renderFrame has multiple exits; [2]=GL submit ms, [3]=renders
++	struct FlyRpTimer {
++		double t0;
++		FlyRpTimer() : t0(emscripten_get_now()) {}
++		~FlyRpTimer() { g_fly_rp[2] += emscripten_get_now() - t0; g_fly_rp[3] += 1; }
++	} fly_rp_timer;
++#endif
+ 	if (!config::EmulateFramebuffer)
+ 		initVideoRoutingFrameBuffer();
+ 	
+diff --git a/core/rend/gles/gltex.cpp b/core/rend/gles/gltex.cpp
+index 348ab06..a92c1a2 100644
+--- a/core/rend/gles/gltex.cpp
++++ b/core/rend/gles/gltex.cpp
+@@ -271,17 +271,43 @@ void ReadRTTBuffer()
+ 	glBindFramebuffer(GL_FRAMEBUFFER, gl.ofbo.origFbo);
+ }
+ 
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++// Spike-composition instrument (2026-07-16): per-frame texture time,
++// split into staleness checks (checksum) and decode+upload (Update).
++// Reset + read each frame by the rec_wasm mainloop breakdown logger.
++#include <emscripten.h>
++extern "C" {
++double g_fly_tex_check_ms = 0;
++double g_fly_tex_update_ms = 0;
++u32 g_fly_tex_update_count = 0;
++}
++#endif
++
+ BaseTextureCacheData *OpenGLRenderer::GetTexture(TSP tsp, TCW tcw, int area)
+ {
+ 	//lookup texture
+ 	TextureCacheData* tf = TexCache.getTextureCacheData(tsp, tcw, area);
+ 
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	double t0 = emscripten_get_now();
++	bool needs = tf->NeedsUpdate();
++	double t1 = emscripten_get_now();
++	g_fly_tex_check_ms += t1 - t0;
++	if (needs)
++	{
++		if (!tf->Update())
++			tf = nullptr;
++		g_fly_tex_update_ms += emscripten_get_now() - t1;
++		g_fly_tex_update_count++;
++	}
++#else
+ 	//update if needed
+ 	if (tf->NeedsUpdate())
+ 	{
+ 		if (!tf->Update())
+ 			tf = nullptr;
+ 	}
++#endif
+ 	else if (tf->IsCustomTextureAvailable())
+ 	{
+ 		TexCache.DeleteLater(tf->texID);
+diff --git a/shell/cmake/DetectArchitecture.cmake b/shell/cmake/DetectArchitecture.cmake
+index 9a4b855..031fd86 100644
+--- a/shell/cmake/DetectArchitecture.cmake
++++ b/shell/cmake/DetectArchitecture.cmake
+@@ -21,6 +21,9 @@ function(detect_architecture symbol arch)
+     endif()
+ endfunction()
+ 
++detect_architecture("__EMSCRIPTEN__" wasm32)
++detect_architecture("__wasm__" wasm32)
++
+ detect_architecture("__ARM64__" arm64)
+ detect_architecture("__aarch64__" arm64)
+ detect_architecture("_M_ARM64" arm64)
+diff --git a/shell/libretro/audiostream.cpp b/shell/libretro/audiostream.cpp
+index 63fe0a4..e841726 100644
+--- a/shell/libretro/audiostream.cpp
++++ b/shell/libretro/audiostream.cpp
+@@ -1,253 +1,403 @@
+-/*
+-    This file is part of Flycast.
+-
+-    Flycast is free software: you can redistribute it and/or modify
+-    it under the terms of the GNU General Public License as published by
+-    the Free Software Foundation, either version 2 of the License, or
+-    (at your option) any later version.
+-
+-    Flycast is distributed in the hope that it will be useful,
+-    but WITHOUT ANY WARRANTY; without even the implied warranty of
+-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-    GNU General Public License for more details.
+-
+-    You should have received a copy of the GNU General Public License
+-    along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
+- */
+-#include "types.h"
+-#include "cfg/option.h"
+-#include "audio/audiostream.h"
+-#include "emulator.h"
+-
+-#include <libretro.h>
+-
+-#include <vector>
+-#include <mutex>
+-
+-/* Detect output refresh rate changes by monitoring
+- * the last 'VSYNC_SWAP_INTERVAL_FRAMES' frames:
+- * - Measure average (mean) audio samples per upload
+- *   operation
+- * - Determine vsync swap interval based on
+- *   expected samples at 60 (or 50) Hz
+- * - Check that vsync swap interval remains
+- *   'stable' for at least 'VSYNC_SWAP_INTERVAL_FRAMES' */
+-#define VSYNC_SWAP_INTERVAL_FRAMES 6
+-/* Calculated swap interval is 'valid' if it is
+- * within 'VSYNC_SWAP_INTERVAL_THRESHOLD' of an integer
+- * value */
+-#define VSYNC_SWAP_INTERVAL_THRESHOLD 0.05f
+-
+-extern bool setAVInfo(retro_system_av_info& avinfo);
+-
+-extern retro_environment_t        environ_cb;
+-extern retro_audio_sample_batch_t audio_batch_cb;
+-
+-extern float libretro_expected_audio_samples_per_run;
+-extern unsigned libretro_vsync_swap_interval;
+-extern bool libretro_detect_vsync_swap_interval;
+-
+-static float audio_samples_per_frame_avg;
+-static unsigned vsync_swap_interval_last;
+-static unsigned vsync_swap_interval_conter;
+-
+-static std::mutex audio_buffer_mutex;
+-static std::vector<int16_t> audio_buffer;
+-static size_t audio_buffer_idx;
+-static size_t audio_batch_frames_max;
+-static bool drop_samples = true;
+-
+-static int16_t *audio_out_buffer = nullptr;
+-
+-void retro_audio_init(void)
+-{
+-	const std::lock_guard<std::mutex> lock(audio_buffer_mutex);
+-
+-	/* Worst case is 25 fps content with an audio sample rate
+-	 * of 44.1 kHz -> 1764 stereo samples
+-	 * But flycast can stop rendering for arbitrary lengths of
+-	 * time, leading to multiple 'frames' worth of audio being
+-	 * uploaded in retro_run(). We therefore require some leniency,
+-	 * but must limit the total number of samples that can be
+-	 * uploaded since the libretro frontend can 'hang' if too
+-	 * many samples are sent during a single call of retro_run().
+-	 * We therefore (arbitrarily) choose to allow up to 10 frames
+-	 * worth of 'worst case' stereo samples... */
+-	size_t audio_buffer_size = (44100 / 25) * 2 * 10;
+-
+-	audio_buffer.resize(audio_buffer_size);
+-	audio_buffer_idx = 0;
+-	audio_batch_frames_max = std::numeric_limits<size_t>::max();
+-
+-	audio_out_buffer = (int16_t*)malloc(audio_buffer_size * sizeof(int16_t));
+-
+-	drop_samples = false;
+-
+-	audio_samples_per_frame_avg = 0.0f;
+-	vsync_swap_interval_last = 1;
+-	vsync_swap_interval_conter = 0;
+-}
+-
+-void retro_audio_deinit(void)
+-{
+-	const std::lock_guard<std::mutex> lock(audio_buffer_mutex);
+-
+-	audio_buffer.clear();
+-	audio_buffer_idx = 0;
+-
+-	if (audio_out_buffer != nullptr)
+-		free(audio_out_buffer);
+-
+-	audio_out_buffer = nullptr;
+-
+-	drop_samples = true;
+-
+-	audio_samples_per_frame_avg = 0.0f;
+-	vsync_swap_interval_last = 1;
+-	vsync_swap_interval_conter = 0;
+-}
+-
+-void retro_audio_flush_buffer(void)
+-{
+-	const std::lock_guard<std::mutex> lock(audio_buffer_mutex);
+-	audio_buffer_idx = 0;
+-
+-	/* We are manually 'resetting' the audio buffer
+-	 * -> any 'drop samples' lock can be released */
+-	drop_samples = false;
+-}
+-
+-void retro_audio_upload(void)
+-{
+-	audio_buffer_mutex.lock();
+-
+-	for (size_t i = 0; i < audio_buffer_idx; i++)
+-		audio_out_buffer[i] = audio_buffer[i];
+-
+-	size_t num_frames = audio_buffer_idx >> 1;
+-	audio_buffer_idx = 0;
+-
+-	/* Uploading audio 'resets' the audio buffer
+-	 * -> any 'drop samples' lock can be released */
+-	drop_samples = false;
+-
+-	audio_buffer_mutex.unlock();
+-
+-	/* Attempt to detect changes in output refresh rate */
+-	if (libretro_detect_vsync_swap_interval &&
+-	    (num_frames > 0))
+-	{
+-		/* Simple running average (leaky-integrator) */
+-		audio_samples_per_frame_avg = ((1.0f / (float)VSYNC_SWAP_INTERVAL_FRAMES) * (float)num_frames) +
+-				((1.0f - (1.0f / (float)VSYNC_SWAP_INTERVAL_FRAMES)) * audio_samples_per_frame_avg);
+-
+-		float swap_ratio = audio_samples_per_frame_avg /
+-				libretro_expected_audio_samples_per_run;
+-		unsigned swap_integer;
+-		float swap_remainder;
+-
+-		/* If internal frame rate is equal to (within threshold)
+-		 * or higher than the default 60 (or 50) Hz, fall back
+-		 * to a swap interval of 1 */
+-		if (swap_ratio < (1.0f + VSYNC_SWAP_INTERVAL_THRESHOLD))
+-		{
+-			swap_integer = 1;
+-			swap_remainder = 0.0f;
+-		}
+-		else
+-		{
+-			swap_integer = (unsigned)(swap_ratio + 0.5f);
+-			swap_remainder = swap_ratio - (float)swap_integer;
+-			swap_remainder = (swap_remainder < 0.0f) ?
+-					-swap_remainder : swap_remainder;
+-		}
+-
+-		/* > Swap interval is considered 'valid' if it is
+-		 *   within VSYNC_SWAP_INTERVAL_THRESHOLD of an integer
+-		 *   value
+-		 * > If valid, check if new swap interval differs from
+-		 *   previously logged value */
+-		if ((swap_remainder <= VSYNC_SWAP_INTERVAL_THRESHOLD) &&
+-			 (swap_integer != libretro_vsync_swap_interval))
+-		{
+-			vsync_swap_interval_conter =
+-					(swap_integer == vsync_swap_interval_last) ?
+-							(vsync_swap_interval_conter + 1) : 0;
+-
+-			/* Check whether swap interval is 'stable' */
+-			if (vsync_swap_interval_conter >= VSYNC_SWAP_INTERVAL_FRAMES)
+-			{
+-				libretro_vsync_swap_interval = swap_integer;
+-				vsync_swap_interval_conter = 0;
+-
+-				/* Notify frontend */
+-				retro_system_av_info avinfo;
+-				setAVInfo(avinfo);
+-				environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avinfo);
+-			}
+-
+-			vsync_swap_interval_last = swap_integer;
+-		}
+-		else
+-			vsync_swap_interval_conter = 0;
+-	}
+-
+-	int16_t *audio_out_buffer_ptr = audio_out_buffer;
+-	while (num_frames > 0)
+-	{
+-		size_t frames_to_write = (num_frames > audio_batch_frames_max) ?
+-				audio_batch_frames_max : num_frames;
+-		size_t frames_written = audio_batch_cb(audio_out_buffer_ptr,
+-				frames_to_write);
+-
+-		if ((frames_written < frames_to_write) &&
+-			 (frames_written > 0))
+-			audio_batch_frames_max = frames_written;
+-
+-		num_frames -= frames_to_write;
+-		audio_out_buffer_ptr += frames_to_write << 1;
+-	}
+-}
+-
+-void WriteSample(s16 r, s16 l)
+-{
+-	const std::lock_guard<std::mutex> lock(audio_buffer_mutex);
+-
+-	if (drop_samples)
+-		return;
+-
+-	if (audio_buffer.size() < audio_buffer_idx + 2)
+-	{
+-		/* Audio buffer overflow...
+-		 * > Drop any existing samples
+-		 * > Drop any future samples until the next
+-		 *   call of retro_audio_upload() */
+-		audio_buffer_idx = 0;
+-		drop_samples = true;
+-		return;
+-	}
+-
+-	audio_buffer[audio_buffer_idx++] = l;
+-	audio_buffer[audio_buffer_idx++] = r;
+-}
+-
+-void InitAudio()
+-{
+-}
+-
+-void TermAudio()
+-{
+-}
+-
+-void StartAudioRecording(bool eight_khz)
+-{
+-}
+-
+-u32 RecordAudio(void *buffer, u32 samples)
+-{
+-	return 0;
+-}
+-
+-void StopAudioRecording()
+-{
+-}
++/*
++    This file is part of Flycast.
++
++    Flycast is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 2 of the License, or
++    (at your option) any later version.
++
++    Flycast is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
++ */
++#include "types.h"
++#include "cfg/option.h"
++#include "audio/audiostream.h"
++#include "emulator.h"
++
++#include <libretro.h>
++
++#include <vector>
++#include <mutex>
++
++/* Detect output refresh rate changes by monitoring
++ * the last 'VSYNC_SWAP_INTERVAL_FRAMES' frames:
++ * - Measure average (mean) audio samples per upload
++ *   operation
++ * - Determine vsync swap interval based on
++ *   expected samples at 60 (or 50) Hz
++ * - Check that vsync swap interval remains
++ *   'stable' for at least 'VSYNC_SWAP_INTERVAL_FRAMES' */
++#define VSYNC_SWAP_INTERVAL_FRAMES 6
++/* Calculated swap interval is 'valid' if it is
++ * within 'VSYNC_SWAP_INTERVAL_THRESHOLD' of an integer
++ * value */
++#define VSYNC_SWAP_INTERVAL_THRESHOLD 0.05f
++
++extern bool setAVInfo(retro_system_av_info& avinfo);
++
++extern retro_environment_t        environ_cb;
++extern retro_audio_sample_batch_t audio_batch_cb;
++
++extern float libretro_expected_audio_samples_per_run;
++extern unsigned libretro_vsync_swap_interval;
++extern bool libretro_detect_vsync_swap_interval;
++
++static float audio_samples_per_frame_avg;
++static unsigned vsync_swap_interval_last;
++static unsigned vsync_swap_interval_conter;
++
++static std::mutex audio_buffer_mutex;
++static std::vector<int16_t> audio_buffer;
++static size_t audio_buffer_idx;
++static size_t audio_batch_frames_max;
++static bool drop_samples = true;
++
++static int16_t *audio_out_buffer = nullptr;
++
++void retro_audio_init(void)
++{
++	const std::lock_guard<std::mutex> lock(audio_buffer_mutex);
++
++	/* Worst case is 25 fps content with an audio sample rate
++	 * of 44.1 kHz -> 1764 stereo samples
++	 * But flycast can stop rendering for arbitrary lengths of
++	 * time, leading to multiple 'frames' worth of audio being
++	 * uploaded in retro_run(). We therefore require some leniency,
++	 * but must limit the total number of samples that can be
++	 * uploaded since the libretro frontend can 'hang' if too
++	 * many samples are sent during a single call of retro_run().
++	 * We therefore (arbitrarily) choose to allow up to 10 frames
++	 * worth of 'worst case' stereo samples... */
++	size_t audio_buffer_size = (44100 / 25) * 2 * 10;
++
++	audio_buffer.resize(audio_buffer_size);
++	audio_buffer_idx = 0;
++	audio_batch_frames_max = std::numeric_limits<size_t>::max();
++
++	audio_out_buffer = (int16_t*)malloc(audio_buffer_size * sizeof(int16_t));
++
++	drop_samples = false;
++
++	audio_samples_per_frame_avg = 0.0f;
++	vsync_swap_interval_last = 1;
++	vsync_swap_interval_conter = 0;
++}
++
++void retro_audio_deinit(void)
++{
++	const std::lock_guard<std::mutex> lock(audio_buffer_mutex);
++
++	audio_buffer.clear();
++	audio_buffer_idx = 0;
++
++	if (audio_out_buffer != nullptr)
++		free(audio_out_buffer);
++
++	audio_out_buffer = nullptr;
++
++	drop_samples = true;
++
++	audio_samples_per_frame_avg = 0.0f;
++	vsync_swap_interval_last = 1;
++	vsync_swap_interval_conter = 0;
++}
++
++void retro_audio_flush_buffer(void)
++{
++	const std::lock_guard<std::mutex> lock(audio_buffer_mutex);
++	audio_buffer_idx = 0;
++
++	/* We are manually 'resetting' the audio buffer
++	 * -> any 'drop samples' lock can be released */
++	drop_samples = false;
++}
++
++size_t retro_audio_buffer_fill(void)
++{
++	/* Returns current buffer fill in stereo frames (sample pairs).
++	 * Used by the frame pacer to sync emulation speed to audio
++	 * consumption rate. Lock-free read — approximate value is fine. */
++	return audio_buffer_idx >> 1;
++}
++
++/* Audio-loss telemetry (2026-07-17): the two silent sample-loss points are
++ * WriteSample overflow (drops the whole buffer + mutes until next upload)
++ * and audio_batch_cb shortfalls (unwritten tail discarded). Counters feed
++ * the HUD so the loss mode can be identified during real play before any
++ * rate-control design. */
++u32 g_aud_overflow_events = 0;   /* WriteSample overflow occurrences */
++u32 g_aud_shortfall_frames = 0;  /* frames the frontend refused (discarded) */
++u32 g_aud_produced_frames = 0;   /* frames handed to audio_batch_cb */
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++/* ★ AudioWorklet ring-buffer sink (2026-07-17). Replaces the RetroArch
++ * OpenAL path on WASM. Why: the OpenAL→WebAudio shim schedules each ~6ms
++ * chunk as its own AudioBufferSourceNode and clamps late buffers to
++ * currentTime — a click-length seam on EVERY late main-thread frame — and
++ * RetroArch's write side SPIN-WAITS the main thread when the queue is full
++ * (a built-in per-frame stall). The worklet consumes from a ring buffer on
++ * the AUDIO thread: gapless under main-thread jank, non-blocking writes,
++ * underruns become counted silence instead of clicks. Stats (queue depth,
++ * underrun frames, dropped frames) surface in the HUD via Module._flyAud. */
++EM_JS(int, fly_worklet_push, (const short* ptr, unsigned frames), {
++	var A = Module._flyAud;
++	if (A && A.failed)
++		return 1;   // worklet unavailable — caller falls back to audio_batch_cb
++	if (!A) {
++		A = Module._flyAud = { ready: false, failed: false, pend: [], drop: 0, lastVol: -1, stats: { avail: 0, under: 0, drop: 0 } };
++		var ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
++		A.ctx = ctx;
++		var src = ""
++			+ "class FlyAudio extends AudioWorkletProcessor {"
++			+ "  constructor() { super();"
++			+ "    this.cap = 32768;"
++			+ "    this.rbL = new Float32Array(this.cap);"
++			+ "    this.rbR = new Float32Array(this.cap);"
++			+ "    this.r = 0; this.w = 0; this.avail = 0;"
++			+ "    this.under = 0; this.drop = 0; this.tick = 0;"
++			+ "    this.primed = false;"
++			+ "    this.port.onmessage = (e) => {"
++			+ "      var d = e.data; var n = d.length >> 1;"
++			+ "      if (this.avail + n > this.cap) { this.drop += n; return; }"
++			+ "      for (var i = 0; i < n; i++) {"
++			+ "        this.rbL[this.w] = d[2*i] / 32768;"
++			+ "        this.rbR[this.w] = d[2*i+1] / 32768;"
++			+ "        this.w = (this.w + 1) % this.cap;"
++			+ "      }"
++			+ "      this.avail += n;"
++			+ "    };"
++			+ "  }"
++			+ "  process(inputs, outputs) {"
++			+ "    var out = outputs[0]; var L = out[0]; var R = out[1] || out[0];"
++			+ "    if (!this.primed) {"
++			+ "      if (this.avail >= 2048) { this.primed = true; }"
++			+ "      else { for (var j = 0; j < L.length; j++) { L[j] = 0; R[j] = 0; } return true; }"
++			+ "    }"
++			+ "    for (var i = 0; i < L.length; i++) {"
++			+ "      if (this.avail > 0) {"
++			+ "        L[i] = this.rbL[this.r]; R[i] = this.rbR[this.r];"
++			+ "        this.r = (this.r + 1) % this.cap; this.avail--;"
++			+ "      } else { L[i] = 0; R[i] = 0; this.under++; this.primed = false; }"
++			+ "    }"
++			+ "    if (++this.tick >= 16) {"
++			+ "      this.tick = 0;"
++			+ "      this.port.postMessage({ avail: this.avail, under: this.under, drop: this.drop });"
++			+ "    }"
++			+ "    return true;"
++			+ "  }"
++			+ "}"
++			+ "registerProcessor('fly-audio', FlyAudio);";
++		var url = URL.createObjectURL(new Blob([src], { type: "application/javascript" }));
++		ctx.audioWorklet.addModule(url).then(function() {
++			var node = new AudioWorkletNode(ctx, "fly-audio", { outputChannelCount: [2] });
++			// Volume: route through a GainNode driven by the EmulatorJS
++			// volume/mute state (players expect the slider to work).
++			A.gain = ctx.createGain();
++			node.connect(A.gain);
++			A.gain.connect(ctx.destination);
++			node.port.onmessage = function(e) { A.stats = e.data; };
++			A.node = node;
++			A.ready = true;
++			for (var i = 0; i < A.pend.length; i++)
++				node.port.postMessage(A.pend[i], [A.pend[i].buffer]);
++			A.pend = [];
++			console.log("[fly-audio] AudioWorklet sink active @" + ctx.sampleRate + "Hz");
++		}, function(e) {
++			console.error("[fly-audio] worklet init failed, falling back to audio_batch_cb: " + (e && e.message));
++			A.failed = true;
++		});
++	}
++	if (A.ctx.state !== "running")
++		A.ctx.resume();
++	// Track EmulatorJS volume/mute (guarded — property names may evolve)
++	if (A.ready) {
++		var vol = 1;
++		try {
++			var E = window.EJS_emulator;
++			if (E) {
++				if (E.muted) vol = 0;
++				else if (typeof E.volume === "number") vol = E.volume;
++			}
++		} catch (e) {}
++		if (A.lastVol !== vol) {
++			A.gain.gain.value = vol;
++			A.lastVol = vol;
++		}
++	}
++	var n = frames * 2;
++	var chunk = new Int16Array(n);
++	chunk.set(Module.HEAP16.subarray(ptr >> 1, (ptr >> 1) + n));
++	// Backpressure (stats are ~45ms stale — leave slack): past ~0.56s queued,
++	// drop instead of growing latency. Non-blocking by construction.
++	if (A.stats.avail > 24576) { A.drop += frames; return; }
++	if (A.ready)
++		A.node.port.postMessage(chunk, [chunk.buffer]);
++	else if (A.pend.length < 64)
++		A.pend.push(chunk);
++	return 0;
++});
++#endif
++
++size_t retro_audio_buffer_capacity(void)
++{
++	return audio_buffer.size() >> 1;
++}
++
++void retro_audio_upload(void)
++{
++	audio_buffer_mutex.lock();
++
++	for (size_t i = 0; i < audio_buffer_idx; i++)
++		audio_out_buffer[i] = audio_buffer[i];
++
++	size_t num_frames = audio_buffer_idx >> 1;
++	audio_buffer_idx = 0;
++
++	/* Uploading audio 'resets' the audio buffer
++	 * -> any 'drop samples' lock can be released */
++	drop_samples = false;
++
++	audio_buffer_mutex.unlock();
++
++	/* Attempt to detect changes in output refresh rate */
++	if (libretro_detect_vsync_swap_interval &&
++	    (num_frames > 0))
++	{
++		/* Simple running average (leaky-integrator) */
++		audio_samples_per_frame_avg = ((1.0f / (float)VSYNC_SWAP_INTERVAL_FRAMES) * (float)num_frames) +
++				((1.0f - (1.0f / (float)VSYNC_SWAP_INTERVAL_FRAMES)) * audio_samples_per_frame_avg);
++
++		float swap_ratio = audio_samples_per_frame_avg /
++				libretro_expected_audio_samples_per_run;
++		unsigned swap_integer;
++		float swap_remainder;
++
++		/* If internal frame rate is equal to (within threshold)
++		 * or higher than the default 60 (or 50) Hz, fall back
++		 * to a swap interval of 1 */
++		if (swap_ratio < (1.0f + VSYNC_SWAP_INTERVAL_THRESHOLD))
++		{
++			swap_integer = 1;
++			swap_remainder = 0.0f;
++		}
++		else
++		{
++			swap_integer = (unsigned)(swap_ratio + 0.5f);
++			swap_remainder = swap_ratio - (float)swap_integer;
++			swap_remainder = (swap_remainder < 0.0f) ?
++					-swap_remainder : swap_remainder;
++		}
++
++		/* > Swap interval is considered 'valid' if it is
++		 *   within VSYNC_SWAP_INTERVAL_THRESHOLD of an integer
++		 *   value
++		 * > If valid, check if new swap interval differs from
++		 *   previously logged value */
++		if ((swap_remainder <= VSYNC_SWAP_INTERVAL_THRESHOLD) &&
++			 (swap_integer != libretro_vsync_swap_interval))
++		{
++			vsync_swap_interval_conter =
++					(swap_integer == vsync_swap_interval_last) ?
++							(vsync_swap_interval_conter + 1) : 0;
++
++			/* Check whether swap interval is 'stable' */
++			if (vsync_swap_interval_conter >= VSYNC_SWAP_INTERVAL_FRAMES)
++			{
++				libretro_vsync_swap_interval = swap_integer;
++				vsync_swap_interval_conter = 0;
++
++				/* Notify frontend */
++				retro_system_av_info avinfo;
++				setAVInfo(avinfo);
++				environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avinfo);
++			}
++
++			vsync_swap_interval_last = swap_integer;
++		}
++		else
++			vsync_swap_interval_conter = 0;
++	}
++
++	int16_t *audio_out_buffer_ptr = audio_out_buffer;
++	g_aud_produced_frames += (u32)num_frames;
++#ifdef __EMSCRIPTEN__
++	/* AudioWorklet sink — RetroArch's OpenAL driver (blocking writes,
++	 * buffer-source seam scheduling) is bypassed entirely. If the worklet
++	 * cannot initialize (old Safari, odd embeds) fall back to the legacy
++	 * audio_batch_cb path permanently: degraded beats mute. */
++	static bool worklet_failed = false;
++	if (num_frames > 0 && !worklet_failed) {
++		if (fly_worklet_push(audio_out_buffer_ptr, (unsigned)num_frames) != 0)
++			worklet_failed = true;
++	}
++	if (!worklet_failed)
++		return;
++#endif
++	while (num_frames > 0)
++	{
++		size_t frames_to_write = (num_frames > audio_batch_frames_max) ?
++				audio_batch_frames_max : num_frames;
++		size_t frames_written = audio_batch_cb(audio_out_buffer_ptr,
++				frames_to_write);
++
++		if ((frames_written < frames_to_write) &&
++			 (frames_written > 0))
++		{
++			audio_batch_frames_max = frames_written;
++			g_aud_shortfall_frames += (u32)(frames_to_write - frames_written);
++		}
++
++		num_frames -= frames_to_write;
++		audio_out_buffer_ptr += frames_to_write << 1;
++	}
++}
++
++void WriteSample(s16 r, s16 l)
++{
++	const std::lock_guard<std::mutex> lock(audio_buffer_mutex);
++
++	if (drop_samples)
++		return;
++
++	if (audio_buffer.size() < audio_buffer_idx + 2)
++	{
++		/* Audio buffer overflow...
++		 * > Drop any existing samples
++		 * > Drop any future samples until the next
++		 *   call of retro_audio_upload() */
++		audio_buffer_idx = 0;
++		drop_samples = true;
++		g_aud_overflow_events++;
++		return;
++	}
++
++	audio_buffer[audio_buffer_idx++] = l;
++	audio_buffer[audio_buffer_idx++] = r;
++}
++
++void InitAudio()
++{
++}
++
++void TermAudio()
++{
++}
++
++void StartAudioRecording(bool eight_khz)
++{
++}
++
++u32 RecordAudio(void *buffer, u32 samples)
++{
++	return 0;
++}
++
++void StopAudioRecording()
++{
++}
+diff --git a/shell/libretro/libretro.cpp b/shell/libretro/libretro.cpp
+index 9dcc6b3..ed858f6 100644
+--- a/shell/libretro/libretro.cpp
++++ b/shell/libretro/libretro.cpp
+@@ -14,10 +14,21 @@
+     You should have received a copy of the GNU General Public License
+     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
+  */
++// FLY_RELEASE_BUILD: public-release artifact switch (build-baked via
++// -DFLY_RELEASE_BUILD=1). HUD becomes opt-in (?hud=1) and the hudlog POST
++// machinery is compiled out. Default 0 = dev/prod behavior unchanged.
++#ifndef FLY_RELEASE_BUILD
++#define FLY_RELEASE_BUILD 0
++#endif
++
+ #include <cstdio>
+ #include <cstdarg>
+ #include <math.h>
+ #include "types.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#include "rec-wasm/fly_instrument.h"
++#endif
+ #ifndef _WIN32
+ #include <sys/time.h>
+ #endif
+@@ -51,6 +62,7 @@
+ #include "emulator.h"
+ #include "hw/sh4/sh4_mem.h"
+ #include "hw/sh4/sh4_sched.h"
++#include "hw/sh4/sh4_core.h"  // SH4ThrownException for escape probe
+ #include "keyboard_map.h"
+ #include "hw/maple/maple_cfg.h"
+ #include "hw/maple/maple_if.h"
+@@ -110,6 +122,45 @@ extern void retro_audio_init(void);
+ extern void retro_audio_deinit(void);
+ extern void retro_audio_flush_buffer(void);
+ extern void retro_audio_upload(void);
++extern size_t retro_audio_buffer_fill(void);
++extern size_t retro_audio_buffer_capacity(void);
++// Audio-loss telemetry (audiostream.cpp) — HUD surfacing
++extern u32 g_aud_overflow_events;
++extern u32 g_aud_shortfall_frames;
++extern u32 g_aud_produced_frames;
++
++// Retro-frontend diagnostic logs (video_cb per-frame dupe tracking).
++// Noisy — only useful for presentation-layer / BLANK-cluster investigation.
++#ifndef FLY_RETRO_DIAG
++#define FLY_RETRO_DIAG 0
++#endif
++
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++// Diagnostic hooks into rec_wasm.cpp + Renderer_if.cpp
++extern u32 g_wasm_block_count;
++extern "C" void fly_dump_pc_trace();
++extern "C" u32 g_fly_rend_start_render_calls;
++// Exception / RTE diagnostics (sh4_interrupts.cpp, sh4_opcodes.cpp)
++extern "C" u32 g_fly_exc_total;
++extern "C" u32 g_fly_exc_count[1024];
++extern "C" u32 g_fly_exc_trace_epc[32];
++extern "C" u32 g_fly_exc_trace_evn[32];
++extern "C" u32 g_fly_exc_trace_head;
++extern "C" u32 g_fly_rte_count;
++// Correct BL-transition counters (sh4_core_regs.cpp)
++extern "C" u32 g_fly_bl_clear_count;
++extern "C" u32 g_fly_bl_set_count;
++// First-dispatch ring dumper (rec_wasm.cpp)
++extern "C" void fly_dump_new_pcs(u32 target_pc);
++// First-exception PC-trace snapshot dumper (rec_wasm.cpp)
++extern "C" void fly_dump_first_exc_trace();
++// ASIC/Holly interrupt counters (holly_intc.cpp)
++extern "C" u32 g_fly_asic_total;
++extern "C" u32 g_fly_asic_vblank_in;
++extern "C" u32 g_fly_asic_vblank_out;
++extern "C" u32 g_fly_asic_hblank;
++extern "C" u32 g_fly_asic_maple;
++#endif
+ 
+ std::string arcadeFlashPath;
+ 
+@@ -1156,6 +1207,13 @@ static void update_variables(bool first_startup)
+ 
+ 	set_variable_visibility();
+ 
++#ifdef __EMSCRIPTEN__
++	// WASM without pthreads: force single-threaded rendering.
++	// ThreadedRendering causes retro_run() to loop up to 5 emu frames
++	// trying to produce a non-dupe, creating massive pacing variance.
++	config::ThreadedRendering = false;
++#endif
++
+ 	if (!first_startup)
+ 	{
+ 		if (wasThreadedRendering != config::ThreadedRendering)
+@@ -1196,8 +1254,505 @@ static void update_variables(bool first_startup)
+ 	}
+ }
+ 
++#ifdef __EMSCRIPTEN__
++// Duration of the previous retro_run's emulation section — the wall-clock
++// pacer's headroom gate (catch-up frames only when the machine can afford
++// them).
++static double fly_last_emu_ms = 0;
++// Frame debt in vblank units + the (trim-adjusted) target rate. File scope:
++// the pacer block accrues debt, the render loop repays it with measured
++// guest time.
++static double fly_owed = 0;
++// ★ DRC REPAIR (2026-07-24): repayment must be denominated in UNTRIMMED
++// native fps. The 2026-07-17 guest-time rework credited debt at the trimmed
++// rate — with accrual also at the trimmed rate, the trim cancels out of the
++// steady state (balance = exactly native vblanks/wall-sec, production pinned
++// to 44100 no matter the trim; measured p=44142 median in locked-60 with the
++// queue at half-full and the trim pinned at max). Repaying at native rate
++// restores the designed ±0.5% game-speed steer: queue refills at ~220/s.
++static double fly_repay_fps = 59.94;
++static double fly_base_fps = 59.94;
++#endif
++
+ void retro_run()
+ {
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	// Auto-run SHIL op tests on first retro_run() call (dev builds only).
++	// GATED OFF: these harnesses (esp. singlestep) compile + execute synthetic
++	// blocks and run hundreds of programs on the FIRST frame; they do not fully
++	// restore global JIT/dispatch state, which black-screens boot. Disabled by
++	// default so games boot normally — run them deliberately via the exported
++	// _run_*_tests() functions in a controlled capture instead.
++	static bool g_autorun_boot_tests = false;
++	{
++		static bool shil_tests_ran = false;
++		if (g_autorun_boot_tests && !shil_tests_ran) {
++			shil_tests_ran = true;
++			int failures = EM_ASM_INT({ return Module._run_shil_op_tests(); });
++			EM_ASM({ console.log('[SHIL-TEST] Auto-run complete: ' + $0 + ' failure(s)'); }, failures);
++			int disp_failures = EM_ASM_INT({ return Module._run_dispatch_tests(); });
++			EM_ASM({ console.log('[DISP-TEST] Auto-run complete: ' + $0 + ' failure(s)'); }, disp_failures);
++			int rte_failures = EM_ASM_INT({ return Module._run_rte_tests(); });
++			EM_ASM({ console.log('[RTE-TEST] Auto-run complete: ' + $0 + ' failure(s)'); }, rte_failures);
++			int ss_failures = EM_ASM_INT({ return Module._run_singlestep_tests(); });
++			EM_ASM({ console.log('[SS-TEST] Auto-run complete: ' + $0 + ' failure(s)'); }, ss_failures);
++		}
++	}
++
++	// Freeze watchdog + progress beacon.
++	//
++	// Primary signal: render_called (g_fly_rend_start_render_calls). If
++	// this stops advancing for 3s+, the game stopped presenting frames —
++	// that's the user-visible "frozen/halted" state, regardless of whether
++	// SH4 block dispatch is still happening.
++	//
++	// Also emits a periodic progress beacon every 2s with delta stats
++	// (blocks_rate, render_rate, cycle delta). Catches gradual slowdowns
++	// that don't trip the hard freeze threshold.
++	{
++		static bool freeze_fired = false;
++		static u32 last_renders = 0;
++		static u32 last_blocks = 0;
++		static int  last_cycle = 0;
++		static double last_render_progress_ms = 0;
++		static double beacon_last_ms = 0;
++		static u32 beacon_blocks_base = 0;
++		static u32 beacon_renders_base = 0;
++		static double hidden_since_ms = 0;
++
++		double now_ms = emscripten_get_now();
++		int hidden = EM_ASM_INT({
++			return (typeof document !== 'undefined' && document.hidden) ? 1 : 0;
++		});
++		if (hidden) {
++			if (hidden_since_ms == 0) hidden_since_ms = now_ms;
++		} else if (hidden_since_ms > 0) {
++			double skew = now_ms - hidden_since_ms;
++			last_render_progress_ms += skew;
++			beacon_last_ms += skew;
++			hidden_since_ms = 0;
++		}
++
++		Sh4Context& ctx = Sh4cntx;
++		u32 cur_renders = g_fly_rend_start_render_calls;
++		u32 cur_blocks  = g_wasm_block_count;
++		int cur_cycle   = ctx.cycle_counter;
++
++		// --- Progress beacon (every 2s, always emitted, even when rendering OK) ---
++		// Writes to window._flyLog (JS array) instead of console.error, so the
++		// user can retrieve clean output via `copy(window._flyLog.join('\n'))`
++		// without drowning in error-level spam from the rest of the engine.
++		if (!hidden && (beacon_last_ms == 0 || now_ms - beacon_last_ms >= 2000.0)) {
++			static u32 beacon_asic_base = 0;
++			static u32 beacon_vbin_base = 0;
++			static u32 beacon_exc_base = 0;
++			static u32 beacon_rte_base = 0;
++			static u64 beacon_sched_base = 0;
++			if (beacon_last_ms > 0) {
++				double dt_ms = now_ms - beacon_last_ms;
++				u32 dblocks = cur_blocks - beacon_blocks_base;
++				u32 drend   = cur_renders - beacon_renders_base;
++				u32 dasic   = g_fly_asic_total - beacon_asic_base;
++				u32 dvbin   = g_fly_asic_vblank_in - beacon_vbin_base;
++				u32 dexc    = g_fly_exc_total - beacon_exc_base;
++				u32 drte    = g_fly_rte_count - beacon_rte_base;
++				u64 sched_now = sh4_sched_now64();
++				u32 dsched  = (u32)(sched_now - beacon_sched_base);
++				u32 buf = (u32)retro_audio_buffer_fill();
++				EM_ASM({
++					if (!window._flyLog) window._flyLog = [];
++					window._flyLog.push('[BEACON] dt=' + $0.toFixed(0) + 'ms'
++						+ ' blk=' + $1 + '/s'
++						+ ' rend=' + $2 + '/s'
++						+ ' vbin=' + $3
++						+ ' asic=' + $4
++						+ ' exc=' + $5
++						+ ' rte=' + $6
++						+ ' sched+=' + $7
++						+ ' pc=0x' + ($8>>>0).toString(16)
++						+ ' cc=' + $9
++						+ ' ipend=0x' + ($10>>>0).toString(16));
++					if (window._flyLog.length > 500) window._flyLog.shift();
++				}, dt_ms,
++				   (u32)(dblocks * 1000.0 / dt_ms),
++				   (u32)(drend   * 1000.0 / dt_ms),
++				   dvbin, dasic, dexc, drte, dsched,
++				   ctx.pc, cur_cycle, ctx.interrupt_pend);
++				(void)buf;
++			}
++			beacon_last_ms = now_ms;
++			beacon_blocks_base = cur_blocks;
++			beacon_renders_base = cur_renders;
++			beacon_asic_base = g_fly_asic_total;
++			beacon_vbin_base = g_fly_asic_vblank_in;
++			beacon_exc_base = g_fly_exc_total;
++			beacon_rte_base = g_fly_rte_count;
++			beacon_sched_base = sh4_sched_now64();
++		}
++
++		// --- Hard freeze watchdog: render_called stalled for 3s ---
++		if (!freeze_fired) {
++			if (cur_renders != last_renders) {
++				last_renders = cur_renders;
++				last_render_progress_ms = now_ms;
++			} else if (last_render_progress_ms > 0 && !hidden
++			           && (now_ms - last_render_progress_ms) > 3000.0) {
++				freeze_fired = true;
++				double stall_ms = now_ms - last_render_progress_ms;
++				FLY_EVT(FLY_EVT_FREEZE_DETECTED,
++					(u32)stall_ms, ctx.pc,
++					*(u32*)&ctx.sr, ctx.interrupt_pend);
++				EM_ASM({
++					if (!window._flyLog) window._flyLog = [];
++					var L = window._flyLog;
++					L.push('[FREEZE] render_called stalled ' + $0.toFixed(0) + 'ms (blocks_still=' + $10 + ')');
++					L.push('[FREEZE] ctx.pc=0x' + ($1>>>0).toString(16)
++						+ ' sr=0x' + ($2>>>0).toString(16)
++						+ ' interrupt_pend=0x' + ($3>>>0).toString(16));
++					L.push('[FREEZE] cycle_counter=' + $4
++						+ ' sh4_sched_next=' + $5
++						+ ' jdyn=0x' + ($6>>>0).toString(16));
++					L.push('[FREEZE] gbr=0x' + ($7>>>0).toString(16)
++						+ ' vbr=0x' + ($8>>>0).toString(16)
++						+ ' pr=0x' + ($9>>>0).toString(16));
++					// Surface one console.error line so the user notices it fired.
++					console.error('[FREEZE] Triggered. Run: copy(window._flyLog.join("\\n"))');
++				}, stall_ms, ctx.pc, *(u32*)&ctx.sr, ctx.interrupt_pend,
++				   ctx.cycle_counter, ctx.sh4_sched_next, ctx.jdyn,
++				   ctx.gbr, ctx.vbr, ctx.pr,
++				   (u32)(cur_blocks - last_blocks));
++				EM_ASM({
++					window._flyLog.push('[FREEZE] render_called=' + $0
++						+ ' audio_buffer=' + $1);
++				}, cur_renders, (u32)retro_audio_buffer_fill());
++
++				// Interrupt counters
++				EM_ASM({
++					window._flyLog.push('[FREEZE] asic_total=' + $0
++						+ ' vblank_in=' + $1
++						+ ' vblank_out=' + $2
++						+ ' hblank=' + $3
++						+ ' maple=' + $4);
++				}, g_fly_asic_total, g_fly_asic_vblank_in,
++				   g_fly_asic_vblank_out, g_fly_asic_hblank, g_fly_asic_maple);
++				// Scheduler state
++				EM_ASM({
++					window._flyLog.push('[FREEZE] sched_now=' + $0);
++				}, (u32)sh4_sched_now64());
++
++				// Exception histogram + last N (epc, expEvn) pairs.
++				// rte_interp is only interpreter-path RTEs (usually wrong ~0).
++				// bl_clear is the authoritative "successful exception recovery"
++				// counter — catches both RTE and direct-SR-write paths.
++				EM_ASM({
++					window._flyLog.push('[FREEZE] Do_Exception total=' + $0
++						+ ' rte_interp=' + $1
++						+ ' bl_set=' + $2
++						+ ' bl_clear=' + $3);
++				}, g_fly_exc_total, g_fly_rte_count,
++				   g_fly_bl_set_count, g_fly_bl_clear_count);
++				// Walk the histogram for any non-zero buckets
++				for (u32 i = 0; i < 1024; i++) {
++					if (g_fly_exc_count[i] > 0) {
++						EM_ASM({
++							window._flyLog.push('[FREEZE]   exc expEvn=0x'
++								+ ($0>>>0).toString(16) + ' count=' + $1);
++						}, i, g_fly_exc_count[i]);
++					}
++				}
++				// Dump last 32 (epc, expEvn) pairs + the SH4 opcode word at each epc.
++				// Reading mem_b directly for RAM addrs (area 3, bit pattern 0x8C or 0xAC).
++				u32 ehead = g_fly_exc_trace_head;
++				u32 ecount = ehead < 32 ? ehead : 32;
++				EM_ASM({
++					window._flyLog.push('[FREEZE] exception trace (last ' + $0 + '):');
++				}, ecount);
++				for (u32 i = 0; i < ecount; i++) {
++					u32 idx = (ehead - ecount + i) & 31;
++					u32 epc = g_fly_exc_trace_epc[idx];
++					u32 op = 0xFFFF;
++					u32 phys = epc & 0x1FFFFFFF;
++					if ((phys >> 26) == 3) { // main RAM (area 3)
++						op = *(u16*)&mem_b[phys & 0x00FFFFFF];
++					}
++					EM_ASM({
++						window._flyLog.push('[FREEZE]   exc#' + $0
++							+ ' epc=0x' + ($1>>>0).toString(16)
++							+ ' evn=0x' + ($2>>>0).toString(16)
++							+ ' op=0x' + ($3>>>0).toString(16).padStart(4,'0'));
++					}, (u32)(i - ecount), epc, g_fly_exc_trace_evn[idx], op);
++				}
++
++				// First-caller lookup for the last faulting PC (the one
++				// that kicked off this exception loop).
++				if (ehead > 0) {
++					u32 last_epc = g_fly_exc_trace_epc[(ehead - 1) & 31];
++					fly_dump_new_pcs(last_epc);
++				}
++				// PC trace snapshot taken at the very first illegal fault —
++				// this is the ACTUAL caller chain, not the fault-loop.
++				fly_dump_first_exc_trace();
++
++				// RAM dumps around suspect addresses
++				auto dump_ram_range = [](const char* label, u32 start, u32 words) {
++					EM_ASM({
++						window._flyLog.push('[FREEZE] RAM ' + UTF8ToString($0)
++							+ ' at 0x' + ($1>>>0).toString(16) + ':');
++					}, label, 0x8C000000 | start);
++					for (u32 i = 0; i < words; i++) {
++						u32 off = start + i * 2;
++						u16 w = *(u16*)&mem_b[off];
++						EM_ASM({
++							window._flyLog.push('[FREEZE]   [0x' + ($0>>>0).toString(16)
++								+ '] = 0x' + ($1>>>0).toString(16).padStart(4,'0'));
++						}, 0x8C000000 | off, (u32)w);
++					}
++				};
++				dump_ram_range("boot/bios vectors", 0x000000, 24);
++				dump_ram_range("around faulting PC", 0x1b89a0, 16);
++
++				fly_dump_pc_trace();
++			}
++			last_blocks = cur_blocks;
++			(void)last_cycle; (void)cur_cycle;
++		}
++	}
++#endif
++#ifdef __EMSCRIPTEN__
++	// ★ WALL-CLOCK PACER (2026-07-17): run DC frames according to REAL TIME
++	// at base_fps, decoupled from display Hz. The previous 1-frame-per-rAF
++	// pacer tied emulation speed to the display (overspeed on >60Hz screens,
++	// permanent slowdown on janky/dropped rAFs — the latter starving audio).
++	// Per retro_run: accumulate owed frames with fractional carry; run 0
++	// (display faster than DC — present dupe), 1 (normal), or 2 (bounded
++	// catch-up). Anti-spiral (the old unbounded catch-up death): catch-up
++	// only when the previous run had headroom, and debt beyond 3 frames is
++	// SHED (tab switch / hard jank) instead of chased.
++	int fly_frames_to_run = 1;
++	{
++		static double prev_time = 0;
++		static int frame_count = 0;
++		static double hud_last_update = 0;
++		static double frame_time_min = 999;
++		static double frame_time_max = 0;
++		static double frame_time_sum = 0;
++
++		double base_fps = SPG_CONTROL.isPAL() ? 50.0 : 59.94;
++		fly_repay_fps = base_fps;   // native, BEFORE the trim below
++		// ★ DYNAMIC RATE TRIM (2026-07-17): the wall clock and the audio
++		// hardware's crystal tick at slightly different rates, so a fixed-
++		// rate producer drifts the worklet queue until it runs dry (skipped
++		// beat fragments) or overfills. Steer emulation speed ±0.5%
++		// (imperceptible) to hold the queue at ~4096 frames (~93ms).
++		{
++			int fly_wq = EM_ASM_INT({
++				var A = Module._flyAud;
++				return (A && A.ready) ? (A.stats.avail | 0) : -1;
++			});
++			if (fly_wq >= 0) {
++				// ★ SATURATING DRC (2026-07-24): the proportional form
++				// asymptotes — +88/s at half-empty but only ~+25/s by 3500,
++				// so the queue never finishes the climb before the next dip
++				// (eyes: "reaches mid-3000s, equally often in 2000s").
++				// Below the near-band spend the full +-0.5% (the cap is the
++				// inaudibility law and is unchanged); proportional only
++				// inside the last 512 so it settles without hunting.
++				double trim;
++				if (fly_wq < 4096 - 512) {
++					trim = 0.005;
++				} else {
++					double err = ((double)fly_wq - 4096.0) / 4096.0;
++					trim = -err * 0.04;
++				}
++				if (trim > 0.005) trim = 0.005;
++				if (trim < -0.005) trim = -0.005;
++				base_fps *= 1.0 + trim;
++			}
++		}
++		fly_base_fps = base_fps;   // render loop repays debt at this rate
++		double period_ms = 1000.0 / base_fps;
++		double now = emscripten_get_now();
++		double elapsed = (prev_time > 0) ? (now - prev_time) : 0;
++		prev_time = now;
++
++		if (elapsed > 0)
++			fly_owed += elapsed / period_ms;
++		else
++			fly_owed = 1;
++		if (fly_owed > 3)
++			fly_owed = 1;                       // shed unpayable debt
++		fly_frames_to_run = (int)fly_owed;
++		if (fly_frames_to_run > 2)
++			fly_frames_to_run = 2;
++		if (fly_frames_to_run == 2 && fly_last_emu_ms > period_ms)
++			fly_frames_to_run = 1;              // no headroom — never spiral
++		if (settings.input.fastForwardMode) {
++			fly_frames_to_run = 1;              // FF: old rAF-paced behavior
++			fly_owed = 0;
++		}
++		// ★ GUEST-TIME ACCOUNTING (2026-07-17): debt is repaid by the guest
++		// time each render actually consumed (measured via sh4_sched_now64 in
++		// the render loop below), NOT by render count. A 30fps-native game
++		// (JGR) advances TWO vblanks per render — counting renders made the
++		// guest run up to 2x wall clock (measured: audio overproduction
++		// +3.4%, 707K frames dropped, beat skipping). BIOS/60fps content was
++		// unaffected, which is why it sounded perfect.
++
++		// Track frame-to-frame timing
++		if (elapsed > 0) {
++			frame_time_sum += elapsed;
++			if (elapsed < frame_time_min) frame_time_min = elapsed;
++			if (elapsed > frame_time_max) frame_time_max = elapsed;
++		}
++		frame_count += fly_frames_to_run;       // count EMULATED frames (true DC fps)
++		// ★ CORE-TIME SPLIT (2026-07-21, render-campaign scoping): accumulate
++		// the previous tick's core-section duration (emu + in-core GL draw,
++		// measured as fly_last_emu_ms). HUD shows its avg as `core:` —
++		// ft − core = browser/EJS/present share; core − emu(ring ~5ms) = GL
++		// draw inside the core. Decomposes the frame on REAL hardware, which
++		// headless timing is structurally blind to.
++		static double fly_core_ms_sum = 0;
++		static int fly_core_ticks = 0;
++		if (fly_last_emu_ms > 0) {
++			fly_core_ms_sum += fly_last_emu_ms;
++			fly_core_ticks++;
++		}
++		// Render-phase accumulators from the renderer (gles.cpp/ta_util.cpp):
++		// [0]=ta_parse total [1]=sort [2]=GL submit [3]=render count
++		// [4]=emu.render() total [5]=AICA/ARM7.
++		// Averaged per RENDER (not per vblank) at each HUD tick, then reset.
++		extern double g_fly_rp[10];
++
++		// HUD: FPS + frame timing (min/avg/max)
++		if (hud_last_update == 0) hud_last_update = now;
++		if (now - hud_last_update >= 1000.0) {
++			double avg_ft = (frame_count > 0) ? (frame_time_sum / frame_count) : 0;
++			size_t abuf = retro_audio_buffer_fill();
++			// Audio telemetry: produced frames/s (44100 = perfectly fed),
++			// cumulative overflow events (ov) and frontend-refused frames (sh).
++			static u32 aud_prod_last = 0;
++			u32 aud_prod_rate = g_aud_produced_frames - aud_prod_last;
++			aud_prod_last = g_aud_produced_frames;
++#if FLY_RELEASE_BUILD
++			// RELEASE: the HUD is opt-in via ?hud=1 in the page URL (checked
++			// once); the hudlog POST block below is compiled out entirely
++			// (users' servers have no /hudlog endpoint).
++			static const bool fly_hud_optin = EM_ASM_INT({
++				return location.search.indexOf('hud=1') >= 0 ? 1 : 0;
++			}) != 0;
++			if (fly_hud_optin)
++#endif
++			{
++			EM_ASM({
++				var el = document.getElementById('fc-hud');
++				if (!el) {
++					el = document.createElement('div');
++					el.id = 'fc-hud';
++					el.style.cssText = 'position:fixed;top:8px;left:8px;z-index:99999;'
++						+ 'background:rgba(0,0,0,0.7);color:#fff;font:12px monospace;'
++						+ 'padding:4px 8px;pointer-events:none;border-radius:3px;';
++					document.body.appendChild(el);
++				}
++				var A = Module._flyAud;
++				var wq = A ? (A.stats.avail | 0) : -1;
++				var un = A ? (A.stats.under | 0) : 0;
++				var dr = A ? ((A.drop | 0) + (A.stats.drop | 0)) : 0;
++				el.textContent = 'FPS:' + $0 + '/' + $1.toFixed(0)
++					+ ' p:' + $6 + '/s wq:' + wq + ' un:' + un + ' dr:' + dr
++					+ ' ov:' + $7
++					+ ' ft:' + $2.toFixed(0) + '/' + $3.toFixed(0) + '/' + $4.toFixed(0)
++					+ ' core:' + $9.toFixed(1)
++					+ ' rp:' + $10.toFixed(1) + '/' + $11.toFixed(1) + '/' + $12.toFixed(1)
++					+ ' er:' + $13.toFixed(1) + ' aica:' + $14.toFixed(1);
++				// ★ HUD RECORDER (2026-07-21): every HUD update is also queued
++				// as a JSON line and flushed to the demo server's /hudlog sink
++				// every 10 samples — a played session leaves a machine-readable
++				// timeline (upstream/logs/hudlog-<sess>.jsonl) with no user
++				// effort. JSON built by string concat + XHR (EM_ASM cannot
++				// carry JS object literals — preprocessor gotcha).
++				var W = window;
++				if (!W._flyHudSess) {
++					W._flyHudSess = Date.now().toString(36);
++					W._flyHudBuf = [];
++				}
++				// EM_ASM is capped at 16 args ($0-$15) — '$16 is not defined'
++				// killed the page once. The sample line is built across TWO
++				// EM_ASM calls: this one leaves the JSON open in _flyHudPart.
++				W._flyHudPart = '{"t":' + Date.now()
++					+ ',"fps":' + $0
++					+ ',"tgt":' + (+$1.toFixed(1))
++					+ ',"ft_min":' + (+$2.toFixed(1))
++					+ ',"ft_avg":' + (+$3.toFixed(1))
++					+ ',"ft_max":' + (+$4.toFixed(1))
++					+ ',"core":' + (+$9.toFixed(2))
++					+ ',"rp_parse":' + (+$10.toFixed(2))
++					+ ',"rp_sort":' + (+$11.toFixed(2))
++					+ ',"rp_draw":' + (+$12.toFixed(2))
++					+ ',"rp_er":' + (+$13.toFixed(2))
++					+ ',"rp_aica":' + (+$14.toFixed(2))
++					+ ',"owed":' + (+$15.toFixed(2))
++					+ ',"wq":' + wq + ',"un":' + un + ',"dr":' + dr;
++			}, frame_count, base_fps, frame_time_min, avg_ft, frame_time_max,
++			   (int)abuf, aud_prod_rate, g_aud_overflow_events, g_aud_shortfall_frames,
++			   fly_core_ticks > 0 ? fly_core_ms_sum / fly_core_ticks : 0.0,
++			   g_fly_rp[3] > 0 ? (g_fly_rp[0] - g_fly_rp[1]) / g_fly_rp[3] : 0.0,
++			   g_fly_rp[3] > 0 ? g_fly_rp[1] / g_fly_rp[3] : 0.0,
++			   g_fly_rp[3] > 0 ? g_fly_rp[2] / g_fly_rp[3] : 0.0,
++			   g_fly_rp[3] > 0 ? g_fly_rp[4] / g_fly_rp[3] : 0.0,
++			   g_fly_rp[3] > 0 ? g_fly_rp[5] / g_fly_rp[3] : 0.0,
++			   fly_owed);
++#if !FLY_RELEASE_BUILD
++			EM_ASM({
++				var W = window;
++				if (!W._flyHudPart) return;
++				W._flyHudBuf.push(W._flyHudPart
++					+ ',"vbl":' + (+$0.toFixed(1))
++					+ ',"mft":' + $1
++					+ ',"rp_ml":' + (+$4.toFixed(2))
++					+ ',"p":' + $2 + ',"ov":' + $3 + '}');
++				W._flyHudPart = null;
++				if (W._flyHudBuf.length >= 10) {
++					var pl = '{"session":"' + W._flyHudSess + '","samples":['
++						+ W._flyHudBuf.join(',') + ']}';
++					W._flyHudBuf.length = 0;
++					try {
++						var x = new XMLHttpRequest();
++						x.open('POST', '/hudlog', true);
++						x.send(pl);
++					} catch (e) {}
++				}
++			}, g_fly_rp[6], (int)g_fly_rp[7], aud_prod_rate, g_aud_overflow_events,
++			   g_fly_rp[6] > 0 ? g_fly_rp[8] / g_fly_rp[6] : 0.0);
++#endif  // !FLY_RELEASE_BUILD (hudlog POST)
++			}
++#ifndef JIT_PROD_BUILD
++			EM_ASM({
++				console.log('[PERF] ' + '{"type":"frame_timing","fps":' + $0
++					+ ',"target_fps":' + (+$1.toFixed(0))
++					+ ',"ft_min":' + (+$2.toFixed(1))
++					+ ',"ft_avg":' + (+$3.toFixed(1))
++					+ ',"ft_max":' + (+$4.toFixed(1))
++					+ ',"aud_p":' + $5
++					+ ',"aud_ov":' + $6
++					+ ',"aud_sh":' + $7
++					+ ',"frames":' + $0 + '}');
++			}, frame_count, base_fps, frame_time_min, avg_ft, frame_time_max,
++			   aud_prod_rate, g_aud_overflow_events, g_aud_shortfall_frames);
++#endif
++			frame_count = 0;
++			frame_time_min = 999;
++			frame_time_max = 0;
++			frame_time_sum = 0;
++			fly_core_ms_sum = 0;
++			fly_core_ticks = 0;
++			g_fly_rp[0] = g_fly_rp[1] = g_fly_rp[2] = g_fly_rp[3] = 0;
++			g_fly_rp[4] = g_fly_rp[5] = g_fly_rp[6] = g_fly_rp[7] = 0;
++			g_fly_rp[8] = 0;
++			hud_last_update = now;
++		}
++	}
++#endif
++
+ 	bool updated = false;
+ 	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
+ 		update_variables(false);
+@@ -1250,14 +1805,84 @@ void retro_run()
+ 		}
+ 		else
+ 		{
++#ifdef __EMSCRIPTEN__
++			// Wall-clock pacer: 0 frames presents a dupe, 2 = bounded
++			// catch-up. Debt is repaid with the GUEST time each render
++			// consumed (30fps-native games advance 2 vblanks per render).
++			// SH4 main clock = 200MHz.
++			double fly_run_t0 = emscripten_get_now();
++			{
++				// Pacer-state telemetry [6]=vblanks emulated, [7]=multi-frame
++				// ticks (the debt-spiral counters; HUD reports per second)
++				extern double g_fly_rp[10];
++				if (fly_frames_to_run > 1)
++					g_fly_rp[7] += 1;
++				u64 fly_vb_t0 = sh4_sched_now64();
++				for (int fly_i = 0; fly_i < fly_frames_to_run && (fly_i == 0 || fly_owed >= 1.0); fly_i++) {
++					// ★ PACER-SPREAD (2026-07-24): one guest-time budget for
++					// the WHOLE host tick — without this, the catch-up
++					// iteration can take a second timed-out gulp right after
++					// the first, rebuilding the 3-vblank freeze the lowered
++					// render timeout (emulator.cpp vblank) just split up.
++					if (fly_i > 0 && sh4_sched_now64() - fly_vb_t0 >= 5000000)
++						break;
++					startTime = sh4_sched_now64();
++					{
++						double fly_er_t0 = emscripten_get_now();
++						emu.render();
++						g_fly_rp[4] += emscripten_get_now() - fly_er_t0;
++					}
++					fly_owed -= (double)(sh4_sched_now64() - startTime)
++					            * fly_repay_fps / 200000000.0;
++				}
++				g_fly_rp[6] += (double)(sh4_sched_now64() - fly_vb_t0)
++				               * fly_repay_fps / 200000000.0;
++			}
++			if (fly_owed < -2.0) fly_owed = -2.0;  // bounded credit
++			fly_last_emu_ms = emscripten_get_now() - fly_run_t0;
++#else
+ 			startTime = sh4_sched_now64();
+ 			emu.render();
++#endif
+ 		}
+ 	} catch (const FlycastException& e) {
+ 		ERROR_LOG(COMMON, "%s", e.what());
+ 		os_notify(e.what(), 5000);
+ 		environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, NULL);
+ 	}
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD)
++	// Exception escape probe — logs which exception type escaped the
++	// FlycastException catch above. We catch, log diagnostic data, then
++	// RE-THROW to preserve existing crash behavior (the surgical fix
++	// session proved a broad catch breaks input handling). If something
++	// escapes to Emscripten's onAbort, this tells us what it was.
++	catch (const SH4ThrownException& ex) {
++		FLY_EVT(FLY_EVT_ESCAPE_EXCEPTION, 0, ex.epc, (u32)ex.expEvn, 0);
++		EM_ASM({
++			if (!window._flyLog) window._flyLog = [];
++			window._flyLog.push('[ESCAPE] SH4ThrownException epc=0x'
++				+ ($0>>>0).toString(16) + ' expEvn=0x' + ($1>>>0).toString(16));
++			console.error('[ESCAPE] SH4ThrownException — see window._flyLog');
++		}, ex.epc, (u32)ex.expEvn);
++		throw;
++	} catch (const std::exception& ex) {
++		FLY_EVT(FLY_EVT_ESCAPE_EXCEPTION, 1, 0, 0, 0);
++		EM_ASM({
++			if (!window._flyLog) window._flyLog = [];
++			window._flyLog.push('[ESCAPE] std::exception what=' + UTF8ToString($0));
++			console.error('[ESCAPE] std::exception — see window._flyLog');
++		}, ex.what());
++		throw;
++	} catch (...) {
++		FLY_EVT(FLY_EVT_ESCAPE_EXCEPTION, 2, 0, 0, 0);
++		EM_ASM({
++			if (!window._flyLog) window._flyLog = [];
++			window._flyLog.push('[ESCAPE] unknown exception');
++			console.error('[ESCAPE] unknown exception — see window._flyLog');
++		});
++		throw;
++	}
++#endif
+ 
+ #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+ 	if (isOpenGL(config::RendererType))
+@@ -1275,6 +1900,22 @@ void retro_run()
+ 		environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avinfo);
+ 	}
+ 
++#if defined(__EMSCRIPTEN__) && !defined(JIT_PROD_BUILD) && FLY_RETRO_DIAG
++	{
++		static int videocb_count = 0;
++		static int first_non_dupe = 0;
++		videocb_count++;
++		if (!is_dupe && first_non_dupe == 0) {
++			first_non_dupe = videocb_count;
++			EM_ASM({ console.log('[retro] FIRST REAL FRAME at video_cb #' + $0 + ' w=' + $1 + ' h=' + $2); },
++				videocb_count, framebufferWidth, framebufferHeight);
++		}
++		if (videocb_count <= 5 || (videocb_count % 10) == 0) {
++			EM_ASM({ console.log('[retro] video_cb #' + $0 + ': is_dupe=' + $1 + ' w=' + $2 + ' h=' + $3); },
++				videocb_count, is_dupe ? 1 : 0, framebufferWidth, framebufferHeight);
++		}
++	}
++#endif
+ 	video_cb(is_dupe ? 0 : RETRO_HW_FRAME_BUFFER_VALID, framebufferWidth, framebufferHeight, 0);
+ 
+ 	if (!config::ThreadedRendering || config::LimitFPS)
+@@ -3579,24 +4220,30 @@ static void retro_keyboard_event(bool down, unsigned keycode, uint32_t character
+ 
+ void fatal_error(const char* text, ...)
+ {
++	va_list args;
++	char temp[2048];
++	va_start(args, text);
++	vsprintf(temp, text, args);
++	va_end(args);
++	strcat(temp, "\n");
+ 	if (log_cb)
+-	{
+-		va_list args;
+-		char temp[2048];
+-		va_start(args, text);
+-		vsprintf(temp, text, args);
+-		va_end(args);
+-		strcat(temp, "\n");
+ 		log_cb(RETRO_LOG_ERROR, temp);
+-	}
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ console.error('[FATAL] ' + UTF8ToString($0)); }, temp);
++#endif
+ }
+ 
+ [[noreturn]] void os_DebugBreak()
+ {
+ 	ERROR_LOG(COMMON, "DEBUGBREAK!");
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ console.error('[os_DebugBreak] called! Stack: ' + new Error().stack); });
++#endif
+ 	//exit(-1);
+ #ifdef __SWITCH__
+ 	svcExitProcess();
++#elif defined(__EMSCRIPTEN__)
++	abort();
+ #else
+ 	__builtin_trap();
+ #endif
