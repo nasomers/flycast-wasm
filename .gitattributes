@@ -1,0 +1,6 @@
+# Shell scripts must stay LF: a CRLF clone on Windows breaks bash
+# ("bad interpreter") because the shebang line ends with \r.
+*.sh text eol=lf
+
+# The upstream patch files are LF; keep them that way (git apply needs LF).
+patches/* text eol=lf

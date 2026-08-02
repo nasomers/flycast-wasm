@@ -1,21 +1,24 @@
 #!/bin/bash
 # Flycast WASM: production core build
 #
-# Verified against a clean checkout on: 2026-08-01 (verified)
-#
 # Prerequisites:
 #   - Linux or WSL2 with Emscripten SDK 3.1.74+ (emsdk activated)
 #   - Upstream flycast cloned at the pinned commit with patches applied:
 #       git clone https://github.com/flyinghead/flycast.git source
 #       cd source && git checkout 2c48c01
 #       git submodule update --init --recursive
+#       # NOTE: shell/libretro/audiostream.cpp has CRLF line endings in the
+#       # upstream repo; convert it to LF or the patch will fail:
+#       sed -i 's/\r$//' shell/libretro/audiostream.cpp
 #       git apply ../patches/wasm-jit-phase1-modified.patch
 #       cp ../patches/rec_wasm.cpp ../patches/wasm_emit.h \
 #          ../patches/wasm_module_builder.h ../patches/fly_instrument.h \
 #          core/rec-wasm/
-#   - An EmulatorJS RetroArch tree built for emscripten (EJS_RA below).
-#     The core links against RetroArch's emscripten objects and JS
-#     libraries from the EmulatorJS build system.
+#   - An EmulatorJS RetroArch tree built for emscripten (EJS_RA).
+#     Build it with build-ejs-ra.sh (IMPORTANT: Makefile.emulatorjs,
+#     HAVE_OPENGLES3=1, and NO HAVE_STATIC_DUMMY - see that script for the
+#     full rationale; the wrong flags cause retro_* collisions and
+#     libretro_dummy_* abort stubs).
 #   - flycast_stubs.o and gl_override.js from this repository's build/
 #     directory.
 #
@@ -29,6 +32,8 @@ EJS_RA="${EJS_RA:-$(pwd)/EJS-RetroArch}"
 STUBS="${STUBS:-$(pwd)/build/flycast_stubs.o}"
 GL_OVERRIDE="${GL_OVERRIDE:-$(pwd)/build/gl_override.js}"
 OUT_DIR="${OUT_DIR:-$(pwd)/out}"
+# nproc does not exist in Git Bash (Windows); JOBS is overridable.
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
 echo "=== STEP 0: Ensure git submodules ==="
 # The upstream clone must have its submodules (core/deps/*) checked out;
@@ -44,7 +49,7 @@ emcmake cmake "$SOURCE_DIR" \
   -DUSE_GLES=ON \
   -DCMAKE_C_FLAGS="-DJIT_PROD_BUILD=1 -DFLY_RELEASE_BUILD=1" \
   -DCMAKE_CXX_FLAGS="-DJIT_PROD_BUILD=1 -DFLY_RELEASE_BUILD=1"
-emmake make -j"$(nproc)"
+emmake make -j"$JOBS"
 
 echo "=== STEP 2: Strip conflicting objects ==="
 cp libflycast_libretro_emscripten.a libflycast_libretro_emscripten_stripped.a
@@ -63,6 +68,12 @@ RA_OBJS=$(find "$EJS_RA/obj-emscripten" -name "*.o" -type f | grep -vE \
   "libchdr_chd|libchdr_cdrom|libchdr_lzma|libchdr_bitstream|libchdr_huffman|libchdr_zlib|libchdr_flac|chd_stream|LzmaEnc|LzmaDec|Lzma2Dec|Lzma86Dec|flycast_stubs|glsym_es3" \
   | sort)
 
+# NOTE: -flto requires that all input objects are LLVM bitcode. Build the
+# EJS_RA and flycast with EMCC_CFLAGS="-flto" (see build-ejs-ra.sh and
+# docs/BUILDING.md). With plain -O3 objects (final wasm), the EJS frontend
+# symbols (cmd_take_screenshot, get_current_frame_count, toggleMainLoop, ...)
+# are not resolved and the link fails with
+# "undefined exported symbol: _cmd_take_screenshot".
 emcc -O3 -flto \
   -s WASM=1 \
   -s WASM_BIGINT \
